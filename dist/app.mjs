@@ -1,0 +1,181 @@
+import {ToyVAE,RNG,gaussian,analyticPosterior,klGaussian,demonstrationCells,sampleNormal} from './core.mjs';
+
+const $=id=>document.getElementById(id);
+const fmt=(x,n=3)=>Number.isFinite(x)?Number(x).toFixed(n):'—';
+const vec=xs=>'['+xs.map(x=>fmt(x,2)).join(', ')+']';
+const M=body=>`<math display="block" xmlns="http://www.w3.org/1998/Math/MathML">${body}</math>`;
+const eqQ=M('<msub><mi>q</mi><mi>φ</mi></msub><mo>(</mo><msub><mi>z</mi><mi>i</mi></msub><mo>|</mo><msub><mi>x</mi><mi>i</mi></msub><mo>)</mo><mo>=</mo><mi>𝒩</mi><mo>(</mo><msub><mi>μ</mi><mi>i</mi></msub><mo>,</mo><mi>diag</mi><mo>(</mo><msub><mi>v</mi><mi>i</mi></msub><mo>)</mo><mo>)</mo>');
+const eqZ=M('<msub><mi>z</mi><mi>i</mi></msub><mo>=</mo><msub><mi>μ</mi><mi>i</mi></msub><mo>+</mo><msqrt><msub><mi>v</mi><mi>i</mi></msub></msqrt><mo>⊙</mo><msub><mi>ε</mi><mi>i</mi></msub><mo>,</mo><mspace width=".5em"/><msub><mi>ε</mi><mi>i</mi></msub><mo>∼</mo><mi>𝒩</mi><mo>(</mo><mn>0</mn><mo>,</mo><mi>I</mi><mo>)</mo>');
+const eqEncoder=M('<msub><mi>x</mi><mi>i</mi></msub><mo>=</mo><mo>[</mo><msub><mi>s</mi><mi>i</mi></msub><mo>;</mo><msub><mi>u</mi><mi>i</mi></msub><mo>]</mo><mo>,</mo><mspace width=".5em"/><msub><mi>h</mi><mi>i</mi></msub><mo>=</mo><msub><mi>f</mi><mi>φ</mi></msub><mo>(</mo><msub><mi>x</mi><mi>i</mi></msub><mo>)</mo>');
+const eqHeads=M('<msub><mi>μ</mi><mi>i</mi></msub><mo>=</mo><msub><mi>W</mi><mi>μ</mi></msub><msub><mi>h</mi><mi>i</mi></msub><mo>+</mo><msub><mi>b</mi><mi>μ</mi></msub><mo>,</mo><mspace width=".5em"/><msub><mi>v</mi><mi>i</mi></msub><mo>=</mo><mi>Softplus</mi><mo>(</mo><msub><mi>W</mi><mi>v</mi></msub><msub><mi>h</mi><mi>i</mi></msub><mo>+</mo><msub><mi>b</mi><mi>v</mi></msub><mo>)</mo><mo>+</mo><msup><mn>10</mn><mrow><mo>−</mo><mn>4</mn></mrow></msup>');
+const eqKL=M('<mi>KL</mi><mo>(</mo><msub><mi>q</mi><mi>φ</mi></msub><mo>‖</mo><mi>p</mi><mo>)</mo><mo>=</mo><mfrac><mn>1</mn><mn>2</mn></mfrac><munderover><mo>∑</mo><mrow><mi>d</mi><mo>=</mo><mn>1</mn></mrow><mi>D</mi></munderover><mo>(</mo><msubsup><mi>μ</mi><mrow><mi>i</mi><mi>d</mi></mrow><mn>2</mn></msubsup><mo>+</mo><msub><mi>v</mi><mrow><mi>i</mi><mi>d</mi></mrow></msub><mo>−</mo><mi>log</mi><msub><mi>v</mi><mrow><mi>i</mi><mi>d</mi></mrow></msub><mo>−</mo><mn>1</mn><mo>)</mo>');
+const model=new ToyVAE(42);
+let active='training',playing=false,timer=null,stage=0,stagePacket=null;
+let space={source:'demo',dim:10,selected:0,kind:'mu',draws:[],cells:demonstrationCells(10)};
+let post={y:1.5,a:1,tau:.7,mu:0,sd:1,draws:[]};
+const stageTitles=['读取观测','编码分布','抽取潜变量','解码与动力学','计算损失','反向传播','更新参数'];
+const stageText=[
+ '从教学数据读取一批细胞。每个细胞包含两基因的未剪接与已剪接表达；训练没有接收造数时的参考时间。',
+ '编码器根据每个细胞的四个观测值计算二维均值与方差。均值、方差是分布的参数，随后才生成潜变量取值。',
+ '从标准正态分布抽取 ε，通过重参数化得到 z。这里保留固定 ε 时，可以清楚观察参数更新带来的变化。',
+ '解码器输出每个目标基因的时间。双基因调控层给出转录率，可微分的常微分方程求解器产生表达预测。',
+ '预测分布与观测表达比较得到重建项；近似后验与标准正态先验之间的差异给出 KL 项。当前教学模型没有额外图先验惩罚。',
+ '沿本次计算链反向计算梯度，包含编码器、采样变换、解码器和动力学求解。梯度表示损失对参数改变的敏感程度。',
+ 'Adam 优化器使用梯度调整可训练参数。一次更新完成后，同一个细胞的均值、方差、时间与表达预测都可能变化。'
+];
+const hero=(n,title,desc,aside)=>`<section class="hero"><div><div class="eyebrow">交互课程 ${n} / 03</div><h1>${title}</h1><p>${desc}</p></div><aside class="hero-aside">${aside}</aside></section>`;
+const sourceDetails=()=>`<details><summary>这与本地 RegVelo 源码怎样对应？</summary><p>读图时区分完整模型结构与浏览器教学计算。训练页确实执行梯度计算和参数更新；它只用于说明机制，不是运行 Python RegVelo 包。</p><div class="table-scroll"><table><thead><tr><th>环节</th><th>本地定位</th><th>浏览器教学模型</th></tr></thead><tbody><tr><td>潜变量维数</td><td>RegVelo 默认 10 维</td><td>训练页用 2 维，形式页可查看 10 维</td></tr><tr><td>编码器</td><td class="source-path">_module.py:534 / inference:655</td><td>线性均值、方差头；省略隐藏层和归一化层</td></tr><tr><td>分布与抽样</td><td class="source-path">scvi/nn/_base_components.py:283–290</td><td>对角高斯，Softplus 方差，重参数化</td></tr><tr><td>时间与动力学</td><td class="source-path">_module.py:755、955、999</td><td>两基因、逐基因时间；六步 RK4；t_max=4</td></tr><tr><td>本地求解器</td><td class="source-path">Dopri5 + FixedStepController + AutoDiffAdjoint</td><td>采用不同的可微 RK4 实现，仅展示机制</td></tr><tr><td>损失</td><td class="source-path">_module.py:864–915</td><td>高斯重建项 + 加权 KL；省略完整 RegVelo 附加惩罚</td></tr><tr><td>参数更新</td><td class="source-path">TrainingPlan.configure_optimizers:391</td><td>浏览器标量自动微分与 Adam；本地默认 AdamW</td></tr></tbody></table></div><p>所有示例均为人工生成；曲线下降只说明这份教学目标在优化，不能据此声称恢复了真实生物调控或证明参数唯一可识别。</p></details>`;
+const trainingHTML=()=>hero('01','看见一次训练，怎样改变模型','从观测表达到近似后验，再到潜变量、时间、动力学预测和损失。可以逐阶段查看，也可以真正运行这个小模型的梯度更新。','<strong>可计算的教学模型</strong>10 个人工细胞 · 2 个基因 · 2 维潜变量。页面内执行真实的数值计算与优化，不依赖 Python 环境。')+`
+ <div class="toolbar"><div class="button-row"><button id="run-train" class="primary">开始训练</button><button id="one-train">更新一步</button><button id="stage-train">逐阶段看一轮</button><button id="infer-train">只提取结果</button><button id="reset-train">重置</button></div><span class="tag amber">教学模拟 · 无真实生物数据</span></div>
+ <div class="metrics" aria-live="polite"><div class="metric"><span class="label">已完成的参数更新</span><strong id="epoch">0</strong><small>每步使用全部 10 个教学细胞</small></div><div class="metric"><span class="label">总目标</span><strong id="loss">—</strong><small>重建项 + λ × KL</small></div><div class="metric"><span class="label">重建项</span><strong id="rec">—</strong><small>负对数似然，数值可以为负</small></div><div class="metric"><span class="label">KL 分布约束</span><strong id="kl">—</strong><small>比较 q(z|x) 与先验 p(z)</small></div></div>
+ <div class="flow" aria-label="一次训练的七个阶段">${stageTitles.map((s,i)=>`<button data-stage="${i}" class="${i===0?'active':''}">${i+1}. ${s}<span>${['输入数据','均值 / 方差','一次采样','表达预测','数值目标','梯度','新参数'][i]}</span></button>`).join('')}</div>
+ <div class="step-explanation" id="stage-text">${stageText[0]}</div>
+ <div class="workspace"><section class="panel"><div class="panel-head"><div><h2>损失如何随更新改变</h2><p class="sub">横轴为已执行的更新次数。显示每次更新前计算的目标值；不保证每一步单调下降。</p></div><span class="tag" id="mode-tag">当前参数的前向值</span></div><canvas id="loss-chart" class="chart" role="img" aria-label="训练损失随参数更新次数变化"></canvas><div class="legend"><span><i></i>总目标</span><span><i class="amber"></i>重建项</span></div><div class="grid2"><label class="control"><span>学习率 <output id="lr-value">0.012</output></span><input id="lr" type="range" min=".001" max=".035" step=".001" value=".012"></label><label class="control"><span>KL 权重 λ <output id="lambda-value">0.050</output></span><input id="lambda" type="range" min="0" max="1" step=".01" value=".05"></label></div><label class="check"><input id="fixed-noise" type="checkbox" checked>固定采样噪声，便于对比同一目标的变化</label><p class="status" id="train-status" role="status">先点击“逐阶段看一轮”，观察数据在七个阶段中的去向。</p></section>
+ <section class="panel"><div class="panel-head"><div><h2>当前细胞的分布与一次采样</h2><p class="sub">椭圆表示二维对角高斯的等密度轮廓。坐标属于潜空间，单位不是 RNA 表达。</p></div></div><label class="control"><span>观察哪个细胞</span><select id="train-cell">${model.data.map((c,i)=>`<option value="${i}">${c.name}</option>`).join('')}</select></label><canvas id="train-space" class="chart" role="img" aria-label="选中细胞的近似后验椭圆及一次潜变量样本"></canvas><div class="legend"><span><i></i>均值与等密度轮廓</span><span><i class="pink"></i>本轮抽到的 z</span></div><div id="train-latent-readout" class="readout mt"></div><a href="#space" class="sub">去第二页，查看它实际对应哪几张数值表 →</a></section></div>
+ <section class="panel wide-panel"><div class="panel-head"><div><h2>一份数据，怎样经过当前模型</h2><p class="sub" id="snapshot-label">显示当前参数下的前向估计。</p></div><span class="tag gray">训练只使用观测 U / S</span></div><div class="grid2"><div><h3>观测与预测表达</h3><div class="table-scroll"><table><thead><tr><th>基因</th><th>观测 U</th><th>预测 U</th><th>观测 S</th><th>预测 S</th><th>估计时间</th></tr></thead><tbody id="prediction-table"></tbody></table></div><p class="sub">造数时的时间仅用于生成输入，没有作为训练标签送入损失。时间值在模型内部尺度上。</p></div><div><h3>优化器实际改变了什么</h3><div class="table-scroll"><table><thead><tr><th>参数</th><th>更新前</th><th>本轮梯度</th><th>更新后</th></tr></thead><tbody id="gradient-table"></tbody></table></div><p class="sub">展示部分无约束参数；动力学中的正速率由 Softplus 变换得到。某项梯度小，不等于该项已被识别。</p></div></div></section>
+ <section class="panel wide-panel"><h2>把图中的动作写成数学关系</h2><div class="grid2"><div><h3>每个细胞有自己的近似后验</h3><div class="formula">${eqQ}<span class="caption">μ 与 v 由共享编码器计算；v 是方差，不是标准差。</span></div><div class="formula">${eqZ}<span class="caption">⊙ 表示逐坐标相乘。固定 ε 时，z 对 μ 与 v 仍可求导。</span></div></div><div><h3>训练目标把表达拟合与分布约束接起来</h3><div class="formula">${M('<mi>ℒ</mi><mo>=</mo><msub><mi>𝔼</mi><msub><mi>q</mi><mi>φ</mi></msub></msub><mo>[</mo><mo>−</mo><mi>log</mi><msub><mi>p</mi><mi>θ</mi></msub><mo>(</mo><mi>u</mi><mo>,</mo><mi>s</mi><mo>|</mo><mi>z</mi><mo>)</mo><mo>]</mo><mo>+</mo><mi>λ</mi><mi>KL</mi><mo>(</mo><msub><mi>q</mi><mi>φ</mi></msub><mo>‖</mo><mi>p</mi><mo>)</mo>')}<span class="caption">这是浏览器教学模型的目标。本地 RegVelo 还加入源码中的额外约束项。</span></div><div class="formula small-formula">${eqKL}</div></div></div><p>完整 RegVelo 的基础计算链是：表达 → 编码分布 → 采样 z → 逐基因时间 → 调控动力学 → 预测表达分布 → 总损失。框架沿这条计算链求梯度，优化器更新允许训练的参数。</p></section>
+ ${sourceDetails()}<section class="recap"><h2>只用文字，重新走一遍训练过程</h2><p>先从输入中取出每个细胞的两种 RNA 表达。编码器为它计算均值和方差，再用噪声生成一次潜变量取值。解码器把潜变量转换成目标基因的时间，动力学模型据此产生表达预测。训练时，程序用观测表达评价这些预测，并加入分布约束；随后计算梯度、更新参数。下一轮使用更新后的同一个模型。点击“只提取结果”时，程序仅计算并展示当前参数给出的结果，不执行参数更新。</p></section><div class="page-links"><span>01 / 03</span><a href="#space">下一页：潜空间到底以什么形式存在 →</a></div>`;
+
+const spaceHTML=()=>hero('02','潜空间，具体存在在哪里？','它在数学上是坐标空间，在程序里表现为数值张量。区分空间、一个点、一个分布，以及一批细胞的矩阵，才能看清模型保存了什么。','<strong>同一细胞，三种相关对象</strong>均值 μ、方差 v、一次样本 z。分布由参数定义；图上的椭圆和点云只是可视化。')+`
+ <div class="toolbar"><div class="button-row"><label class="sub">示例来源 <select id="space-source"><option value="demo">独立的五细胞形状示意</option><option value="trained">训练页当前编码器的结果</option></select></label><label class="sub">潜变量维度 <select id="space-dim"><option>2</option><option>3</option><option>5</option><option selected>10</option></select></label></div><span class="tag" id="space-shape">一批均值：5 × 10</span></div>
+ <div class="workspace"><section class="panel"><div class="panel-head"><div><h2>一个空间里的点与分布</h2><p class="sub" id="projection-note">只显示第 1、2 个坐标；十维空间的其余坐标没有被画出。</p></div></div><div class="cell-pills" id="cell-pills"></div><canvas id="space-chart" class="chart tall" role="img" aria-label="潜空间中五个细胞的均值、后验轮廓与采样点"></canvas><div class="legend"><span><i></i>细胞均值</span><span><i class="amber"></i>选中细胞的分布轮廓</span><span><i class="pink"></i>从选中分布抽到的点</span></div><div class="button-row mt"><button id="sample-one" class="primary">抽取一个 z</button><button id="sample-many">再抽取 50 个 z</button><button id="clear-samples">清除采样点</button></div><p class="status" id="space-status" role="status">先选一个细胞，再抽样。均值和方差固定时，抽到的点仍然可以不同。</p></section>
+ <section class="panel"><h2>改变分布参数，看图怎样响应</h2><p class="sub">这里只改变形状示意中的分布参数；这项交互不代表进行一次 RegVelo 训练。</p><label class="control"><span>第1维均值 μ₁ <output id="mu1-value"></output></span><input id="mu1" type="range" min="-2.4" max="2.4" step=".02"></label><label class="control"><span>第2维均值 μ₂ <output id="mu2-value"></output></span><input id="mu2" type="range" min="-2.4" max="2.4" step=".02"></label><label class="control"><span>第1维方差 v₁ <output id="var1-value"></output></span><input id="var1" type="range" min=".02" max="1.6" step=".02"></label><label class="control"><span>第2维方差 v₂ <output id="var2-value"></output></span><input id="var2" type="range" min=".02" max="1.6" step=".02"></label><div class="readout" id="space-selected"></div><div class="formula">${eqZ}</div><p class="sub">方差增加会扩大不确定范围；均值移动会改变分布中心。一次样本 z 只是其中一个可能取值。</p></section></div>
+ <section class="panel wide-panel"><div class="panel-head"><div><h2>程序里实际操作的是这些数值</h2><p class="sub">每行对应一个细胞，每列对应一个潜坐标。选择不同视图，比较同一形状下数值的含义。</p></div><div class="button-row"><button data-kind="mu" class="small primary">均值 μ</button><button data-kind="variance" class="small">方差 v</button><button data-kind="z" class="small">一次采样 z</button></div></div><div class="table-scroll"><table id="tensor-table"></table></div><p class="tensor-note" id="tensor-note"></p><div class="shape-chain"><b>输入表达：B × 2G</b><span>→</span><b>μ：B × D</b><span>＋</span><b>v：B × D</b><span>→</span><b>一次 Z：B × D</b><span>→</span><b>重复抽 S 次：S × B × D</b></div></section>
+ <section class="panel wide-panel"><h2>均值与方差，具体从哪里算出来？</h2><p>默认正态潜变量配置下，先拼接同一细胞的剪接后与未剪接表达，再经过共享编码网络。网络的两个输出头分别给出均值和正方差。</p><div class="formula">${eqEncoder}</div><div class="formula">${eqHeads}<span class="caption">Softplus 是让输出为正的平滑函数。这里的正方差与 10⁻⁴ 稳定项，对应本地 RegVelo 传给 scvi Encoder 的默认设置。</span></div><div id="space-equation-values" class="readout"></div><p class="sub">下面只展开当前细胞的前两个坐标；矩阵表格仍保留全部坐标。方差先开平方，再与噪声逐项相乘。</p></section>
+ <section class="panel wide-panel"><div class="grid3"><div class="definition"><strong>空间：ℝᴰ</strong><span>所有 D 个实数坐标组成的集合。默认 D=10。坐标轴由模型学习定义，不能仅凭轴编号给它命名为某条生物通路。</span></div><div class="definition"><strong>点：zᵢ ∈ ℝᴰ</strong><span>一个细胞的一次潜变量取值，是长度为 D 的向量。许多细胞的向量可以按行堆成矩阵。</span></div><div class="definition"><strong>分布：qφ(zᵢ|xᵢ)</strong><span>描述这个细胞在潜空间里的可能取值。程序用 μᵢ、vᵢ 定义对角高斯，再从中抽样；图上的云不是额外保存的实体。</span></div></div><div class="formula">${eqQ}</div><div class="callout">潜变量 z、模型输出的逐基因时间 t，以及观测表达 U/S，属于不同对象。z 经过解码器才得到时间；时间再参与动力学计算。</div></section>
+ ${sourceDetails()}<section class="recap"><h2>只用文字，重新描述这些对象怎样产生</h2><p>先读取一个细胞的表达数据。编码器据此算出两个长度相同的向量，分别作为均值和方差。它们共同定义这个细胞的近似后验。程序再取一份标准正态噪声，结合均值与方差，得到一个潜变量向量。把各细胞的向量按行放在一起，就得到一批潜变量矩阵；再次抽样时，矩阵数值可以改变，维度含义保持不变。</p></section><div class="page-links"><a href="#training">← 训练怎样改变这些参数</a><a href="#posterior">下一页：后验与近似后验 →</a></div>`;
+
+const posteriorHTML=()=>hero('03','后验：看过数据以后，z 更可能在哪里？','先用一个能算出精确后验的线性高斯例子理解贝叶斯更新，再把它与 RegVelo 编码器给出的近似后验对应起来。','<strong>本页有一份可核对的答案</strong>精确后验来自线性高斯教学模型。RegVelo 的非线性生成过程通常没有这样的解析解。')+`
+ <div class="workspace"><section class="panel"><div class="panel-head"><div><h2>先验、精确后验与近似后验</h2><p class="sub">固定已观测到的 y，沿横轴考察不同潜变量 z 的可能性。</p></div><span class="tag amber">可解析教学模型</span></div><canvas id="posterior-chart" class="chart tall" role="img" aria-label="标准正态先验、精确高斯后验和可调近似后验的概率密度曲线"></canvas><div class="legend"><span><i class="blue"></i>先验 p(z)</span><span><i></i>精确后验 p(z|y)</span><span><i class="dashed"></i>近似后验 q(z|y)</span></div><div class="grid3 mt"><div class="readout"><span class="sub">精确后验均值</span><br><strong id="post-mean"></strong></div><div class="readout"><span class="sub">精确后验方差</span><br><strong id="post-var"></strong></div><div class="readout"><span class="sub">KL(q ‖ 精确后验)</span><br><strong id="post-kl"></strong></div></div><p class="status" id="post-status" role="status">减小观测噪声，观察后验如何集中。然后调整 q，使它贴近精确后验。</p></section>
+ <section class="panel"><h2>先改变观测，再改变近似</h2><label class="control"><span>观察到的数值 y <output id="y-value"></output></span><input id="y" type="range" min="-3" max="3" step=".05" value="1.5"></label><label class="control"><span>生成关系系数 a <output id="a-value"></output></span><input id="a" type="range" min=".3" max="2" step=".05" value="1"></label><label class="control"><span>观测噪声标准差 τ <output id="tau-value"></output></span><input id="tau" type="range" min=".2" max="2" step=".05" value=".7"></label><hr style="border:0;border-top:1px solid var(--line);margin:21px 0"><label class="control"><span>近似均值 μq <output id="qmu-value"></output></span><input id="qmu" type="range" min="-8" max="8" step=".025" value="0"></label><label class="control"><span>近似标准差 σq <output id="qsd-value"></output></span><input id="qsd" type="range" min=".05" max="2.5" step=".025" value="1"></label><div class="button-row"><button id="q-step" class="primary">最小化 KL 一步</button><button id="q-align">对齐解析解</button></div><p class="sub">“对齐解析解”直接填写已知答案，便于比较；“最小化 KL 一步”实际按这个简单高斯问题的梯度调整 q。两者都不代表训练了 RegVelo。</p></section></div>
+ <section class="panel wide-panel"><h2>三种概率对象，分别在说什么？</h2><div class="grid3"><div class="definition"><strong>先验 p(z)</strong><span>还没有针对当前细胞观察表达时，对潜变量的概率假设。默认的标准正态先验以零为中心、单位方差。</span></div><div class="definition"><strong>后验 pθ(z|x)</strong><span>固定当前生成模型参数 θ，观察到表达 x 后，哪些 z 更能解释这些观测。它由贝叶斯公式定义。</span></div><div class="definition"><strong>近似后验 qφ(z|x)</strong><span>编码器根据表达计算出来的、容易采样和求密度的分布。它用来逼近难直接计算的后验。</span></div></div><div class="formula">${M('<msub><mi>p</mi><mi>θ</mi></msub><mo>(</mo><mi>z</mi><mo>|</mo><mi>x</mi><mo>)</mo><mo>=</mo><mfrac><mrow><msub><mi>p</mi><mi>θ</mi></msub><mo>(</mo><mi>x</mi><mo>|</mo><mi>z</mi><mo>)</mo><mi>p</mi><mo>(</mo><mi>z</mi><mo>)</mo></mrow><mrow><mo>∫</mo><msub><mi>p</mi><mi>θ</mi></msub><mo>(</mo><mi>x</mi><mo>|</mo><mi>z</mi><mo>)</mo><mi>p</mi><mo>(</mo><mi>z</mi><mo>)</mo><mi>d</mi><mi>z</mi></mrow></mfrac>')}<span class="caption">分子是“这个 z 解释数据的能力 × 先验支持”；分母把整个分布归一化。</span></div></section>
+ <section class="panel wide-panel"><div class="grid2"><div><h2>本页为什么能算出精确后验？</h2><div class="formula">${M('<mi>z</mi><mo>∼</mo><mi>𝒩</mi><mo>(</mo><mn>0</mn><mo>,</mo><mn>1</mn><mo>)</mo><mo>,</mo><mspace width=".5em"/><mi>y</mi><mo>|</mo><mi>z</mi><mo>∼</mo><mi>𝒩</mi><mo>(</mo><mi>a</mi><mi>z</mi><mo>,</mo><msup><mi>τ</mi><mn>2</mn></msup><mo>)</mo>')}</div><div class="formula">${M('<msub><mi>v</mi><mi>post</mi></msub><mo>=</mo><mfrac><msup><mi>τ</mi><mn>2</mn></msup><mrow><msup><mi>τ</mi><mn>2</mn></msup><mo>+</mo><msup><mi>a</mi><mn>2</mn></msup></mrow></mfrac><mo>,</mo><mspace width=".5em"/><msub><mi>μ</mi><mi>post</mi></msub><mo>=</mo><mfrac><mrow><mi>a</mi><mi>y</mi></mrow><mrow><msup><mi>τ</mi><mn>2</mn></msup><mo>+</mo><msup><mi>a</mi><mn>2</mn></msup></mrow></mfrac>')}</div><p>这里生成关系是线性的，先验和观测噪声都是高斯，所以能直接算出后验均值与方差。改变噪声会改变数据提供的信息强度。</p></div><div><h2>RegVelo怎样处理难算的后验？</h2><p>用编码器为每个细胞计算 μᵢ 与 vᵢ，构造对角高斯近似 qφ，再把表达重建和分布约束连接进训练目标。</p><div class="formula">${eqQ}</div><div class="formula small-formula">${M('<mi>log</mi><msub><mi>p</mi><mi>θ</mi></msub><mo>(</mo><mi>x</mi><mo>)</mo><mo>=</mo><mi>ELBO</mi><mo>+</mo><mi>KL</mi><mo>(</mo><msub><mi>q</mi><mi>φ</mi></msub><mo>‖</mo><msub><mi>p</mi><mi>θ</mi></msub><mo>(</mo><mi>z</mi><mo>|</mo><mi>x</mi><mo>)</mo><mo>)</mo>')}</div><p class="sub">ELBO 是“证据下界”。上式是标准变分恒等式；RegVelo 实际总目标还包含 KL 权重和额外惩罚项，不能把它们全部当成同一个标准 ELBO。</p></div></div></section>
+ <div class="callout mt">这里讨论的是细胞潜变量 z 的近似后验。当前代码中反复抽取 z，不等于为调控网络每个权重、每个动力学参数都建立了完整后验；它们在这份实现中主要作为可训练参数进行优化。</div>
+ ${sourceDetails()}<section class="recap"><h2>只用文字，重新走一遍后验估计</h2><p>先固定当前生成模型的参数，并观察一个细胞的表达。不同潜变量取值，对这份表达的解释能力不同；把这种解释能力与先验结合，就定义了后验。简单线性高斯模型能直接求出答案，图中的实线就是这个答案。RegVelo 的生成过程更复杂，于是编码器用均值和方差给出一个可计算的近似。训练通过表达拟合和分布约束更新网络，使这个近似服务于当前模型的估计过程。</p></section><div class="page-links"><a href="#space">← 看均值、方差和样本的实际形式</a><a href="#training">回到训练：参数怎样更新 →</a></div>`;
+
+function canvas(id){const c=$(id),d=window.devicePixelRatio||1,w=c.clientWidth,h=c.clientHeight;c.width=Math.round(w*d);c.height=Math.round(h*d);const g=c.getContext('2d');g.scale(d,d);g.clearRect(0,0,w,h);g.font='11px "Microsoft YaHei",sans-serif';return {c,g,w,h};}
+const palette={teal:'#087d86',pink:'#ae4774',amber:'#ae6b13',blue:'#4966b2',grid:'#e2e8ed',text:'#687989'};
+function axes(g,w,h,{xmin=-4,xmax=4,ymin=-3,ymax=3,xlabel='z₁',ylabel='z₂',ticks=4}={}){
+  const l=43,r=18,t=22,b=38,iw=w-l-r,ih=h-t-b;
+  const X=x=>l+(x-xmin)/(xmax-xmin)*iw,Y=y=>t+ih-(y-ymin)/(ymax-ymin)*ih;
+  g.strokeStyle=palette.grid;g.fillStyle=palette.text;g.lineWidth=1;g.textAlign='center';
+  for(let i=0;i<=ticks;i++){const x=xmin+(xmax-xmin)*i/ticks,y=ymin+(ymax-ymin)*i/ticks;g.beginPath();g.moveTo(X(x),t);g.lineTo(X(x),t+ih);g.stroke();g.fillText(fmt(x,Math.abs(xmax-xmin)>10?0:1),X(x),h-18);g.beginPath();g.moveTo(l,Y(y));g.lineTo(l+iw,Y(y));g.stroke();g.textAlign='right';g.fillText(fmt(y,Math.abs(ymax-ymin)>10?0:1),l-7,Y(y)+4);g.textAlign='center';}
+  g.fillStyle='#415868';g.fillText(xlabel,l+iw/2,h-2);g.textAlign='left';g.fillText(ylabel,l,t-7);return {X,Y,l,t,iw,ih};
+}
+function plotEllipse(g,map,mu,variance,color,alpha=1){
+  g.save();g.globalAlpha=alpha;g.strokeStyle=color;g.fillStyle=color+'0c';
+  for(const k of [1,2]){g.beginPath();for(let i=0;i<=100;i++){const a=i/100*Math.PI*2,x=map.X(mu[0]+k*Math.sqrt(variance[0])*Math.cos(a)),y=map.Y(mu[1]+k*Math.sqrt(variance[1])*Math.sin(a));i?g.lineTo(x,y):g.moveTo(x,y);}if(k===1)g.fill();g.lineWidth=k===1?1.5:1;g.setLineDash(k===2?[4,4]:[]);g.stroke();}
+  g.restore();g.fillStyle=color;g.beginPath();g.arc(map.X(mu[0]),map.Y(mu[1]),4,0,Math.PI*2);g.fill();
+}
+function dot(g,map,x,y,color,r=3){g.fillStyle=color;g.beginPath();g.arc(map.X(x),map.Y(y),r,0,Math.PI*2);g.fill();}
+function updateFormulaLabels(){document.querySelectorAll('math').forEach(el=>{if(!el.getAttribute('aria-label'))el.setAttribute('aria-label',el.textContent.replace(/\s+/g,' '));});}
+function stop(){playing=false;if(timer)clearTimeout(timer);timer=null;if($('run-train'))$('run-train').textContent='开始训练';}
+function renderRoute(){
+  stop();const requested=location.hash.slice(1)||'training';active=['training','space','posterior'].includes(requested)?requested:'training';
+  $('main').innerHTML=active==='training'?trainingHTML():active==='space'?spaceHTML():posteriorHTML();
+  document.querySelectorAll('[data-route]').forEach(a=>a.setAttribute('aria-current',a.dataset.route===active?'page':'false'));
+  document.title=({training:'训练过程',space:'潜空间的存在形式',posterior:'后验与近似后验'}[active])+' · RegVelo 潜空间实验室';
+  if(active==='training')setupTraining();else if(active==='space')setupSpace();else setupPosterior();updateFormulaLabels();
+  window.__latentLab={model,route:active,state:()=>({epoch:model.epoch,space,post}),navigate:route=>{location.hash=route;}};
+}
+window.addEventListener('hashchange',()=>{renderRoute();window.scrollTo(0,0);});
+let resizeTimer;window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>{if(active==='training')refreshTraining();else if(active==='space')refreshSpace();else refreshPosterior();},100);});
+
+// Page-specific interactions are defined below. The shared model stays in browser memory.
+let trainViewMode='inspect';
+function trainingOptions(){return {lr:Number($('lr').value),lambda:Number($('lambda').value),fixedNoise:$('fixed-noise').checked,selected:Number($('train-cell').value)};}
+function showStage(n){stage=n;document.querySelectorAll('[data-stage]').forEach(b=>b.classList.toggle('active',Number(b.dataset.stage)===n));$('stage-text').textContent=stageText[n];}
+function setupTraining(){
+  trainViewMode='inspect';stagePacket=null;stage=0;
+  $('run-train').onclick=()=>{if(playing){stop();return;}stagePacket=null;playing=true;$('run-train').textContent='暂停训练';const tick=()=>{if(!playing||active!=='training')return;if(model.epoch>=300){stop();$('train-status').textContent='已到 300 次更新。可以重置，或只提取当前结果。';return;}doTrainingStep();timer=setTimeout(tick,65);};tick();};
+  $('one-train').onclick=()=>{stop();stagePacket=null;doTrainingStep();};
+  $('stage-train').onclick=()=>{
+    stop();trainViewMode='inspect';
+    if(!stagePacket){stagePacket=model.evaluate({...trainingOptions(),gradient:true});showStage(0);$('stage-train').textContent='下一计算阶段';refreshTraining(stagePacket);$('train-status').textContent='逐阶段查看同一轮的前向值与梯度；到最后确认更新时，参数才发生改变。';}
+    else if(stage<6){showStage(stage+1);refreshTraining(stagePacket);$('stage-train').textContent=stage===6?'执行本轮更新':'下一计算阶段';}
+    else{stagePacket=null;doTrainingStep();$('stage-train').textContent='逐阶段看一轮';}
+  };
+  $('infer-train').onclick=()=>{stop();stagePacket=null;trainViewMode='infer';const before=JSON.stringify(model.p);const r=model.infer(trainingOptions());refreshTraining(r);$('train-status').textContent=before===JSON.stringify(model.p)?'已提取当前参数的结果：没有计算训练损失，也没有更新参数。更新次数保持不变。':'参数校验异常';showStage(3);};
+  $('reset-train').onclick=()=>{stop();model.reset();stagePacket=null;trainViewMode='inspect';showStage(0);$('stage-train').textContent='逐阶段看一轮';refreshTraining();$('train-status').textContent='已恢复初始模型和相同的人工数据。';};
+  for(const id of ['lr','lambda'])$(id).oninput=()=>{stop();stagePacket=null;trainViewMode='inspect';refreshTraining();$('train-status').textContent=id==='lambda'?'KL 权重已改变，当前目标随之改变。曲线保留历史设置下的值。':'学习率只影响后续更新步幅，不会立即改变当前参数。';};
+  $('fixed-noise').onchange=()=>{stop();stagePacket=null;refreshTraining();};
+  $('train-cell').onchange=()=>{stagePacket=null;refreshTraining();};
+  document.querySelectorAll('[data-stage]').forEach(b=>b.onclick=()=>{stop();showStage(Number(b.dataset.stage));});refreshTraining();
+}
+function doTrainingStep(){
+  trainViewMode='train';const r=model.step(trainingOptions());
+  if(r.error){stop();$('train-status').textContent=r.error;return;}
+  showStage(6);refreshTraining(r);$('train-status').textContent=`已完成第 ${model.epoch} 次更新。下方前向数值来自本轮更新前，参数表展示这次更新。`;
+}
+function refreshTraining(provided=null){
+  const o=trainingOptions();$('lr-value').textContent=fmt(o.lr,3);$('lambda-value').textContent=fmt(o.lambda,3);
+  const r=provided??(trainViewMode==='infer'?model.infer(o):model.evaluate(o));
+  $('epoch').textContent=model.epoch;$('loss').textContent=fmt(r.loss);$('rec').textContent=fmt(r.reconstruction);$('kl').textContent=fmt(r.kl);
+  $('mode-tag').textContent=trainViewMode==='infer'?'提取结果 · 无参数更新':trainViewMode==='train'?'本轮更新前的前向值':'当前参数的前向值';
+  $('snapshot-label').textContent=trainViewMode==='train'?'前向快照属于本轮更新前；参数表同时给出更新后的值。':trainViewMode==='infer'?'只提取当前参数的生成结果，没有计算训练损失。':'显示当前参数下的前向估计；查看不会更新参数。';
+  const s=r.snapshot;
+  $('prediction-table').innerHTML=[0,1].map(g=>`<tr><td>基因 ${g===0?'A':'B'}</td><td>${fmt(s.observed[g])}</td><td>${fmt(s.pred[g])}</td><td>${fmt(s.observed[2+g])}</td><td>${fmt(s.pred[2+g])}</td><td>${fmt(s.time[g])}</td></tr>`).join('');
+  const labels={m00:'编码均值权重',t00:'时间解码权重',w01:'调控权重 W₁₂',beta0:'β₁ 无约束参数',gamma0:'γ₁ 无约束参数'};
+  $('gradient-table').innerHTML=Object.entries(labels).map(([k,label])=>{const c=trainViewMode==='infer'?null:model.last?.changes[k];return `<tr><td>${label}</td><td>${fmt(c?.before??model.p[k])}</td><td>${c?fmt(c.gradient):'—'}</td><td>${c?fmt(c.after):'—'}</td></tr>`;}).join('');
+  $('train-latent-readout').innerHTML=`均值 μ = ${vec(s.mu)}<br>方差 v = ${vec(s.variance)}<br>噪声 ε = ${vec(s.eps)}<br>本次样本 z = ${vec(s.z)}`;
+  drawLoss();const {g,w,h}=canvas('train-space');const bound=Math.max(3,...s.mu.map((v,j)=>Math.abs(v)+2.4*Math.sqrt(s.variance[j])),...s.z.map(Math.abs));const map=axes(g,w,h,{xmin:-bound,xmax:bound,ymin:-bound,ymax:bound});plotEllipse(g,map,s.mu,s.variance,palette.teal);dot(g,map,s.z[0],s.z[1],palette.pink,5);
+}
+function drawLoss(){
+  const {g,w,h}=canvas('loss-chart');const hist=model.history;
+  if(!hist.length){axes(g,w,h,{xmin:0,xmax:10,ymin:-5,ymax:15,xlabel:'参数更新次数',ylabel:'目标值'});g.fillStyle=palette.text;g.textAlign='center';g.fillText('运行一步后，这里会显示实际计算的损失。',w/2,h/2);return;}
+  const vs=hist.flatMap(v=>[v.loss,v.reconstruction]),lo=Math.min(...vs),hi=Math.max(...vs),pad=Math.max(1,(hi-lo)*.15);const map=axes(g,w,h,{xmin:0,xmax:Math.max(10,model.epoch),ymin:lo-pad,ymax:hi+pad,xlabel:'参数更新次数',ylabel:'目标值'});
+  for(const [key,color] of [['loss',palette.teal],['reconstruction',palette.amber]]){g.strokeStyle=color;g.lineWidth=2;g.beginPath();hist.forEach((r,i)=>{const x=map.X(r.epoch),y=map.Y(r[key]);i?g.lineTo(x,y):g.moveTo(x,y);});g.stroke();if(hist.length===1)dot(g,map,hist[0].epoch,hist[0][key],color,3);}
+}
+
+let spaceSampleSerial=0,spaceRows=[];
+function loadSpaceCells(){
+  if(space.source==='trained'){space.dim=2;space.cells=model.data.map((c,i)=>({name:c.name,...model.encoder(i)}));}
+  else space.cells=demonstrationCells(space.dim);
+  space.selected=Math.min(space.selected,space.cells.length-1);space.draws=[];makeSpaceRows();
+}
+function makeSpaceRows(){const r=new RNG(829+spaceSampleSerial);spaceRows=space.cells.map(c=>sampleNormal(c.mu,c.variance,r));}
+function setupSpace(){
+  loadSpaceCells();$('space-source').value=space.source;$('space-dim').value=space.dim;
+  $('space-source').onchange=()=>{space.source=$('space-source').value;loadSpaceCells();refreshSpace();};
+  $('space-dim').onchange=()=>{space.dim=Number($('space-dim').value);loadSpaceCells();refreshSpace();};
+  for(const id of ['mu1','mu2','var1','var2'])$(id).oninput=()=>{
+    const c=space.cells[space.selected],arr=id.startsWith('mu')?c.mu:c.variance,dim=id.endsWith('1')?0:1;arr[dim]=Number($(id).value);space.draws=[];makeSpaceRows();refreshSpace();
+  };
+  $('sample-one').onclick=()=>drawSpaceSamples(1);$('sample-many').onclick=()=>drawSpaceSamples(50);$('clear-samples').onclick=()=>{space.draws=[];refreshSpace();};
+  document.querySelectorAll('[data-kind]').forEach(b=>b.onclick=()=>{space.kind=b.dataset.kind;if(space.kind==='z'&&!space.draws.length)drawSpaceSamples(1);else refreshSpace();});refreshSpace();
+}
+function drawSpaceSamples(n){
+  const c=space.cells[space.selected],r=new RNG(17+(++spaceSampleSerial)*677);for(let i=0;i<n;i++)space.draws.push(sampleNormal(c.mu,c.variance,r));space.draws=space.draws.slice(-250);spaceRows[space.selected]=space.draws.at(-1).slice();refreshSpace();$('space-status').textContent=`${c.name} 已显示 ${space.draws.length} 个样本。每一个完整样本都有 ${space.dim} 个坐标；图上仅画出前两个。`;
+}
+function refreshSpace(){
+  const c=space.cells[space.selected];$('space-dim').value=space.dim;$('space-dim').disabled=space.source==='trained';
+  $('space-shape').textContent=`一批均值：${space.cells.length} × ${space.dim}`;
+  $('projection-note').textContent=`只显示第 1、2 个坐标；当前共 ${space.dim} 维。${space.source==='trained'?'数值来自训练页的当前编码器。':'独立教学数值，不是实际拟合细胞。'}`;
+  $('cell-pills').innerHTML=space.cells.map((c,i)=>`<button data-cell="${i}" class="${i===space.selected?'active':''}">${c.name}</button>`).join('');
+  document.querySelectorAll('[data-cell]').forEach(b=>b.onclick=()=>{space.selected=Number(b.dataset.cell);space.draws=[];refreshSpace();});
+  for(const [id,arr,j] of [['mu1','mu',0],['mu2','mu',1],['var1','variance',0],['var2','variance',1]]){$(id).value=c[arr][j];$(id).disabled=space.source==='trained';$(id+'-value').textContent=fmt(c[arr][j],2);}
+  $('space-selected').innerHTML=`${c.name}：<br>μ = ${vec(c.mu)}<br>v = ${vec(c.variance)}<br>前两维标准差 = ${vec(c.variance.slice(0,2).map(Math.sqrt))}`;
+  document.querySelectorAll('[data-kind]').forEach(b=>b.classList.toggle('primary',b.dataset.kind===space.kind));
+  const key=space.kind;const matrix=key==='z'?spaceRows:space.cells.map(c=>c[key]);
+  $('tensor-table').innerHTML=`<thead><tr><th>细胞 / 坐标</th>${Array.from({length:space.dim},(_,j)=>`<th>${key==='mu'?'μ':key==='variance'?'v':'z'}${j+1}</th>`).join('')}</tr></thead><tbody>${matrix.map((row,i)=>`<tr class="${i===space.selected?'selected':''}"><td>${space.cells[i].name}</td>${row.map((v,j)=>`<td class="${j<2?'axis ':''}${v<0?'val-negative':'val-positive'}">${fmt(v,3)}</td>`).join('')}</tr>`).join('')}</tbody>`;
+  $('tensor-note').textContent=key==='mu'?'均值矩阵对应 qz_m：每个细胞的分布中心。它可以是负数。':key==='variance'?'方差矩阵对应 qz_v：各坐标的方差，必须为正；标准差是它的平方根。':'样本矩阵对应 z：从每个细胞自己的分布抽一次。表格中选中行使用最近抽到的完整向量。';
+  const sample=spaceRows[space.selected];$('space-equation-values').innerHTML=[0,1].map(j=>{const sd=Math.sqrt(c.variance[j]),eps=(sample[j]-c.mu[j])/sd;return `第 ${j+1} 维：${fmt(c.mu[j])} ＋ √${fmt(c.variance[j])} × ${fmt(eps)} ＝ ${fmt(sample[j])}`;}).join('<br>');
+  const {g,w,h}=canvas('space-chart');let bound=3.5;space.cells.forEach(c=>{bound=Math.max(bound,...c.mu.slice(0,2).map((v,j)=>Math.abs(v)+2.2*Math.sqrt(c.variance[j])));});space.draws.forEach(z=>{bound=Math.max(bound,Math.abs(z[0])+.2,Math.abs(z[1])+.2);});bound=Math.min(12,bound);const map=axes(g,w,h,{xmin:-bound,xmax:bound,ymin:-bound,ymax:bound});
+  space.cells.forEach((c,i)=>{plotEllipse(g,map,c.mu,c.variance,i===space.selected?palette.amber:palette.teal,i===space.selected?1:.35);g.fillStyle='#465c6b';g.fillText(String(i+1),map.X(c.mu[0])+7,map.Y(c.mu[1])-7);});space.draws.forEach(z=>dot(g,map,z[0],z[1],palette.pink,2.3));
+}
+
+function setupPosterior(){
+  for(const [id,key] of [['y','y'],['a','a'],['tau','tau'],['qmu','mu'],['qsd','sd']]){$(id).value=post[key];$(id).oninput=()=>{post[key]=Number($(id).value);refreshPosterior();};}
+  $('q-step').onclick=()=>{const p=analyticPosterior(post.y,post.a,post.tau),before=klGaussian(post.mu,post.sd**2,p.mu,p.variance);post.mu-=.15*(post.mu-p.mu);const grad=Math.max(-2,Math.min(2,post.sd**2/p.variance-1));post.sd=Math.max(.05,Math.min(2.5,post.sd*Math.exp(-.08*grad)));refreshPosterior();const after=klGaussian(post.mu,post.sd**2,p.mu,p.variance);$('post-status').textContent=`对 q 的高斯参数做了一步优化：KL 从 ${fmt(before,4)} 变为 ${fmt(after,4)}。生成模型和观测保持不变。`;};
+  $('q-align').onclick=()=>{const p=analyticPosterior(post.y,post.a,post.tau);post.mu=p.mu;post.sd=p.sd;refreshPosterior();$('post-status').textContent='已直接把 q 的均值与方差设为解析答案。这是可解析高斯例子的对照，不代表非线性 RegVelo 的精确后验已知。';};refreshPosterior();
+}
+function refreshPosterior(){
+  for(const [id,key] of [['y','y'],['a','a'],['tau','tau'],['qmu','mu'],['qsd','sd']]){$(id).value=post[key];$(id+'-value').textContent=fmt(post[key],3);}
+  const p=analyticPosterior(post.y,post.a,post.tau);$('post-mean').textContent=fmt(p.mu,4);$('post-var').textContent=fmt(p.variance,4);$('post-kl').textContent=fmt(Math.max(0,klGaussian(post.mu,post.sd**2,p.mu,p.variance)),5);
+  const {g,w,h}=canvas('posterior-chart');const xmin=Math.min(-4,p.mu-3*p.sd,post.mu-3*post.sd),xmax=Math.max(4,p.mu+3*p.sd,post.mu+3*post.sd),ymax=Math.max(gaussian(0,0,1),gaussian(p.mu,p.mu,p.sd),gaussian(post.mu,post.mu,post.sd))*1.15;const map=axes(g,w,h,{xmin,xmax,ymin:0,ymax,xlabel:'潜变量 z',ylabel:'概率密度',ticks:4});
+  const curves=[[0,1,palette.blue,false],[p.mu,p.sd,palette.teal,false],[post.mu,post.sd,palette.pink,true]];
+  for(const [mu,sd,color,dashed] of curves){g.beginPath();g.strokeStyle=color;g.lineWidth=2.2;g.setLineDash(dashed?[6,4]:[]);for(let i=0;i<=400;i++){const x=xmin+(xmax-xmin)*i/400,y=gaussian(x,mu,sd);i?g.lineTo(map.X(x),map.Y(y)):g.moveTo(map.X(x),map.Y(y));}g.stroke();}g.setLineDash([]);
+  g.fillStyle=palette.text;g.textAlign='right';g.fillText('每条密度曲线下的总面积为 1',w-20,18);
+}
+
+renderRoute();

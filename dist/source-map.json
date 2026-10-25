@@ -1,0 +1,39 @@
+{
+  "title": "RegVelo 潜空间实验室",
+  "date": "2026-10-25",
+  "sources": {
+    "RegVelo module": {
+      "path": "regvelo/src/regvelo/_module.py",
+      "sha256": "c5b9ab38c752ebef12df8e594f5327d97507961cbc562220791e3d097d6903b3"
+    },
+    "RegVelo API": {
+      "path": "regvelo/src/regvelo/_model.py",
+      "sha256": "d08df1fe104778ceeb616f2de74404dea25466f441a5e91a7a62131ea60ccc3c"
+    },
+    "scvi Encoder": {
+      "path": "scvi-tools-1.2.0/src/scvi/nn/_base_components.py",
+      "sha256": "fdbea7d324ec4051471ccffa9bc87fbf365f7832bc6bdc4ae041d411c5f5038d"
+    }
+  },
+  "source_locations": {
+    "encoder_input": "regvelo/src/regvelo/_module.py:682-684",
+    "encoder_heads_and_sample": "scvi-tools-1.2.0/src/scvi/nn/_base_components.py:283-290",
+    "decoder_time": "regvelo/src/regvelo/_module.py:755,955",
+    "kl": "regvelo/src/regvelo/_module.py:864",
+    "reconstruction": "regvelo/src/regvelo/_module.py:866-869",
+    "full_objective": "regvelo/src/regvelo/_module.py:909-915"
+  },
+  "scope": "默认 normal 潜变量配置；近似后验为对角高斯。",
+  "training_demo": {
+    "data": "10 personal-data-free synthetic cells, two genes",
+    "latent_dimension": 2,
+    "encoder": "linear mean/variance heads, spliced then unspliced, input divided by 2",
+    "dynamics": "two-gene Softplus GRN, per-gene terminal times, differentiable 6-step RK4",
+    "likelihood": "independent Gaussian with fixed standard deviation 0.18",
+    "objective": "average reconstruction NLL plus weighted diagonal-Gaussian KL",
+    "optimizer": "Adam, gradient norm capped at 5",
+    "not_equivalent_to": "full RegVelo, original solver, complete penalty terms, preprocessing or fitted biological results"
+  },
+  "posterior_demo": "analytically tractable one-dimensional linear Gaussian model; exact posterior here is not the exact RegVelo posterior",
+  "privacy": "No real data uploaded. Calculations run in browser memory. Reload resets training."
+}
