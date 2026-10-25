@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="结合 RegVelo 本地源码，交互理解训练、潜空间向量与近似后验。">
+  <meta name="description" content="结合 RegVelo 本地源码，交互理解训练、潜空间、近似后验，以及编码器怎样把一个细胞的表达位置逐步算成潜空间位置。">
   <meta name="theme-color" content="#14273d">
   <title>RegVelo 潜空间实验室</title>
   <link rel="stylesheet" href="style.css">
@@ -12,15 +12,16 @@
   <a class="skip" href="#main">跳到主要内容</a>
   <header class="topbar"><div class="shell head-inner">
     <a class="brand" href="#training" aria-label="RegVelo 潜空间实验室首页"><span class="brand-icon" aria-hidden="true">∴</span><span>RegVelo <b>潜空间实验室</b></span></a>
-    <nav aria-label="三个教学页面">
+    <nav aria-label="四个教学页面">
       <a href="#training" data-route="training">01 训练过程</a>
       <a href="#space" data-route="space">02 潜空间的形式</a>
       <a href="#posterior" data-route="posterior">03 后验与近似</a>
+      <a href="#encoder" data-route="encoder">04 编码器映射</a>
     </nav>
   </div></header>
   <main id="main" class="shell" tabindex="-1"></main>
   <footer class="shell footer"><span>源码对齐：本地 RegVelo · scvi-tools 1.2.0</span><span>图中数据均为教学构造 · 无真实细胞数据上传</span><a href="source-map.json" target="_blank" rel="noopener">查看来源与版本</a></footer>
-  <noscript><div class="shell panel">交互实验需要启用 JavaScript。潜空间在默认模型中是 ℝ¹⁰；每个细胞的近似后验用一个均值向量和一个方差向量表示，抽样后得到一个潜变量向量。</div></noscript>
+  <noscript><div class="shell panel">交互实验需要启用 JavaScript。潜空间在默认模型中是 ℝ¹⁰；每个细胞的近似后验用一个均值向量和一个方差向量表示，抽样后得到一个潜变量向量。第四页把编码器的一次前向计算逐步展开：4 维表达输入经均值头与方差头得到 2 个均值与 2 个方差，再由一份标准正态噪声得到样本 z。</div></noscript>
   <script type="module" src="app.mjs"></script>
 </body>
 </html>

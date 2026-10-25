@@ -1,4 +1,4 @@
-import {ToyVAE,RNG,gaussian,analyticPosterior,klGaussian,demonstrationCells,sampleNormal} from './core.mjs';
+import {ToyVAE,RNG,gaussian,analyticPosterior,klGaussian,demonstrationCells,sampleNormal,encoderTrace,pca2,pairwiseGeometry} from './core.mjs';
 
 const $=id=>document.getElementById(id);
 const fmt=(x,n=3)=>Number.isFinite(x)?Number(x).toFixed(n):'—';
@@ -23,7 +23,7 @@ const stageText=[
  '沿本次计算链反向计算梯度，包含编码器、采样变换、解码器和动力学求解。梯度表示损失对参数改变的敏感程度。',
  'Adam 优化器使用梯度调整可训练参数。一次更新完成后，同一个细胞的均值、方差、时间与表达预测都可能变化。'
 ];
-const hero=(n,title,desc,aside)=>`<section class="hero"><div><div class="eyebrow">交互课程 ${n} / 03</div><h1>${title}</h1><p>${desc}</p></div><aside class="hero-aside">${aside}</aside></section>`;
+const hero=(n,title,desc,aside)=>`<section class="hero"><div><div class="eyebrow">交互课程 ${n} / 04</div><h1>${title}</h1><p>${desc}</p></div><aside class="hero-aside">${aside}</aside></section>`;
 const sourceDetails=()=>`<details><summary>这与本地 RegVelo 源码怎样对应？</summary><p>读图时区分完整模型结构与浏览器教学计算。训练页确实执行梯度计算和参数更新；它只用于说明机制，不是运行 Python RegVelo 包。</p><div class="table-scroll"><table><thead><tr><th>环节</th><th>本地定位</th><th>浏览器教学模型</th></tr></thead><tbody><tr><td>潜变量维数</td><td>RegVelo 默认 10 维</td><td>训练页用 2 维，形式页可查看 10 维</td></tr><tr><td>编码器</td><td class="source-path">_module.py:534 / inference:655</td><td>线性均值、方差头；省略隐藏层和归一化层</td></tr><tr><td>分布与抽样</td><td class="source-path">scvi/nn/_base_components.py:283–290</td><td>对角高斯，Softplus 方差，重参数化</td></tr><tr><td>时间与动力学</td><td class="source-path">_module.py:755、955、999</td><td>两基因、逐基因时间；六步 RK4；t_max=4</td></tr><tr><td>本地求解器</td><td class="source-path">Dopri5 + FixedStepController + AutoDiffAdjoint</td><td>采用不同的可微 RK4 实现，仅展示机制</td></tr><tr><td>损失</td><td class="source-path">_module.py:864–915</td><td>高斯重建项 + 加权 KL；省略完整 RegVelo 附加惩罚</td></tr><tr><td>参数更新</td><td class="source-path">TrainingPlan.configure_optimizers:391</td><td>浏览器标量自动微分与 Adam；本地默认 AdamW</td></tr></tbody></table></div><p>所有示例均为人工生成；曲线下降只说明这份教学目标在优化，不能据此声称恢复了真实生物调控或证明参数唯一可识别。</p></details>`;
 const trainingHTML=()=>hero('01','看见一次训练，怎样改变模型','从观测表达到近似后验，再到潜变量、时间、动力学预测和损失。可以逐阶段查看，也可以真正运行这个小模型的梯度更新。','<strong>可计算的教学模型</strong>10 个人工细胞 · 2 个基因 · 2 维潜变量。页面内执行真实的数值计算与优化，不依赖 Python 环境。')+`
  <div class="toolbar"><div class="button-row"><button id="run-train" class="primary">开始训练</button><button id="one-train">更新一步</button><button id="stage-train">逐阶段看一轮</button><button id="infer-train">只提取结果</button><button id="reset-train">重置</button></div><span class="tag amber">教学模拟 · 无真实生物数据</span></div>
@@ -31,17 +31,17 @@ const trainingHTML=()=>hero('01','看见一次训练，怎样改变模型','从�
  <div class="flow" aria-label="一次训练的七个阶段">${stageTitles.map((s,i)=>`<button data-stage="${i}" class="${i===0?'active':''}">${i+1}. ${s}<span>${['输入数据','均值 / 方差','一次采样','表达预测','数值目标','梯度','新参数'][i]}</span></button>`).join('')}</div>
  <div class="step-explanation" id="stage-text">${stageText[0]}</div>
  <div class="workspace"><section class="panel"><div class="panel-head"><div><h2>损失如何随更新改变</h2><p class="sub">横轴为已执行的更新次数。显示每次更新前计算的目标值；不保证每一步单调下降。</p></div><span class="tag" id="mode-tag">当前参数的前向值</span></div><canvas id="loss-chart" class="chart" role="img" aria-label="训练损失随参数更新次数变化"></canvas><div class="legend"><span><i></i>总目标</span><span><i class="amber"></i>重建项</span></div><div class="grid2"><label class="control"><span>学习率 <output id="lr-value">0.012</output></span><input id="lr" type="range" min=".001" max=".035" step=".001" value=".012"></label><label class="control"><span>KL 权重 λ <output id="lambda-value">0.050</output></span><input id="lambda" type="range" min="0" max="1" step=".01" value=".05"></label></div><label class="check"><input id="fixed-noise" type="checkbox" checked>固定采样噪声，便于对比同一目标的变化</label><p class="status" id="train-status" role="status">先点击“逐阶段看一轮”，观察数据在七个阶段中的去向。</p></section>
- <section class="panel"><div class="panel-head"><div><h2>当前细胞的分布与一次采样</h2><p class="sub">椭圆表示二维对角高斯的等密度轮廓。坐标属于潜空间，单位不是 RNA 表达。</p></div></div><label class="control"><span>观察哪个细胞</span><select id="train-cell">${model.data.map((c,i)=>`<option value="${i}">${c.name}</option>`).join('')}</select></label><canvas id="train-space" class="chart" role="img" aria-label="选中细胞的近似后验椭圆及一次潜变量样本"></canvas><div class="legend"><span><i></i>均值与等密度轮廓</span><span><i class="pink"></i>本轮抽到的 z</span></div><div id="train-latent-readout" class="readout mt"></div><a href="#space" class="sub">去第二页，查看它实际对应哪几张数值表 →</a></section></div>
+ <section class="panel"><div class="panel-head"><div><h2>当前细胞的分布与一次采样</h2><p class="sub">椭圆表示二维对角高斯的等密度轮廓。坐标属于潜空间，单位不是 RNA 表达。</p></div></div><label class="control"><span>观察哪个细胞</span><select id="train-cell">${model.data.map((c,i)=>`<option value="${i}">${c.name}</option>`).join('')}</select></label><canvas id="train-space" class="chart" role="img" aria-label="选中细胞的近似后验椭圆及一次潜变量样本"></canvas><div class="legend"><span><i></i>均值与等密度轮廓</span><span><i class="pink"></i>本轮抽到的 z</span></div><div id="train-latent-readout" class="readout mt"></div><p class="sub"><a href="#space">第二页：这些数值放在哪几张表里</a> · <a href="#encoder">第四页：这个点怎样由编码器逐步算出</a></p></section></div>
  <section class="panel wide-panel"><div class="panel-head"><div><h2>一份数据，怎样经过当前模型</h2><p class="sub" id="snapshot-label">显示当前参数下的前向估计。</p></div><span class="tag gray">训练只使用观测 U / S</span></div><div class="grid2"><div><h3>观测与预测表达</h3><div class="table-scroll"><table><thead><tr><th>基因</th><th>观测 U</th><th>预测 U</th><th>观测 S</th><th>预测 S</th><th>估计时间</th></tr></thead><tbody id="prediction-table"></tbody></table></div><p class="sub">造数时的时间仅用于生成输入，没有作为训练标签送入损失。时间值在模型内部尺度上。</p></div><div><h3>优化器实际改变了什么</h3><div class="table-scroll"><table><thead><tr><th>参数</th><th>更新前</th><th>本轮梯度</th><th>更新后</th></tr></thead><tbody id="gradient-table"></tbody></table></div><p class="sub">展示部分无约束参数；动力学中的正速率由 Softplus 变换得到。某项梯度小，不等于该项已被识别。</p></div></div></section>
  <section class="panel wide-panel"><h2>把图中的动作写成数学关系</h2><div class="grid2"><div><h3>每个细胞有自己的近似后验</h3><div class="formula">${eqQ}<span class="caption">μ 与 v 由共享编码器计算；v 是方差，不是标准差。</span></div><div class="formula">${eqZ}<span class="caption">⊙ 表示逐坐标相乘。固定 ε 时，z 对 μ 与 v 仍可求导。</span></div></div><div><h3>训练目标把表达拟合与分布约束接起来</h3><div class="formula">${M('<mi>ℒ</mi><mo>=</mo><msub><mi>𝔼</mi><msub><mi>q</mi><mi>φ</mi></msub></msub><mo>[</mo><mo>−</mo><mi>log</mi><msub><mi>p</mi><mi>θ</mi></msub><mo>(</mo><mi>u</mi><mo>,</mo><mi>s</mi><mo>|</mo><mi>z</mi><mo>)</mo><mo>]</mo><mo>+</mo><mi>λ</mi><mi>KL</mi><mo>(</mo><msub><mi>q</mi><mi>φ</mi></msub><mo>‖</mo><mi>p</mi><mo>)</mo>')}<span class="caption">这是浏览器教学模型的目标。本地 RegVelo 还加入源码中的额外约束项。</span></div><div class="formula small-formula">${eqKL}</div></div></div><p>完整 RegVelo 的基础计算链是：表达 → 编码分布 → 采样 z → 逐基因时间 → 调控动力学 → 预测表达分布 → 总损失。框架沿这条计算链求梯度，优化器更新允许训练的参数。</p></section>
- ${sourceDetails()}<section class="recap"><h2>只用文字，重新走一遍训练过程</h2><p>先从输入中取出每个细胞的两种 RNA 表达。编码器为它计算均值和方差，再用噪声生成一次潜变量取值。解码器把潜变量转换成目标基因的时间，动力学模型据此产生表达预测。训练时，程序用观测表达评价这些预测，并加入分布约束；随后计算梯度、更新参数。下一轮使用更新后的同一个模型。点击“只提取结果”时，程序仅计算并展示当前参数给出的结果，不执行参数更新。</p></section><div class="page-links"><span>01 / 03</span><a href="#space">下一页：潜空间到底以什么形式存在 →</a></div>`;
+ ${sourceDetails()}<section class="recap"><h2>只用文字，重新走一遍训练过程</h2><p>先从输入中取出每个细胞的两种 RNA 表达。编码器为它计算均值和方差，再用噪声生成一次潜变量取值。解码器把潜变量转换成目标基因的时间，动力学模型据此产生表达预测。训练时，程序用观测表达评价这些预测，并加入分布约束；随后计算梯度、更新参数。下一轮使用更新后的同一个模型。点击“只提取结果”时，程序仅计算并展示当前参数给出的结果，不执行参数更新。</p></section><div class="page-links"><span>01 / 04</span><a href="#space">下一页：潜空间到底以什么形式存在 →</a></div>`;
 
 const spaceHTML=()=>hero('02','潜空间，具体存在在哪里？','它在数学上是坐标空间，在程序里表现为数值张量。区分空间、一个点、一个分布，以及一批细胞的矩阵，才能看清模型保存了什么。','<strong>同一细胞，三种相关对象</strong>均值 μ、方差 v、一次样本 z。分布由参数定义；图上的椭圆和点云只是可视化。')+`
  <div class="toolbar"><div class="button-row"><label class="sub">示例来源 <select id="space-source"><option value="demo">独立的五细胞形状示意</option><option value="trained">训练页当前编码器的结果</option></select></label><label class="sub">潜变量维度 <select id="space-dim"><option>2</option><option>3</option><option>5</option><option selected>10</option></select></label></div><span class="tag" id="space-shape">一批均值：5 × 10</span></div>
  <div class="workspace"><section class="panel"><div class="panel-head"><div><h2>一个空间里的点与分布</h2><p class="sub" id="projection-note">只显示第 1、2 个坐标；十维空间的其余坐标没有被画出。</p></div></div><div class="cell-pills" id="cell-pills"></div><canvas id="space-chart" class="chart tall" role="img" aria-label="潜空间中五个细胞的均值、后验轮廓与采样点"></canvas><div class="legend"><span><i></i>细胞均值</span><span><i class="amber"></i>选中细胞的分布轮廓</span><span><i class="pink"></i>从选中分布抽到的点</span></div><div class="button-row mt"><button id="sample-one" class="primary">抽取一个 z</button><button id="sample-many">再抽取 50 个 z</button><button id="clear-samples">清除采样点</button></div><p class="status" id="space-status" role="status">先选一个细胞，再抽样。均值和方差固定时，抽到的点仍然可以不同。</p></section>
  <section class="panel"><h2>改变分布参数，看图怎样响应</h2><p class="sub">这里只改变形状示意中的分布参数；这项交互不代表进行一次 RegVelo 训练。</p><label class="control"><span>第1维均值 μ₁ <output id="mu1-value"></output></span><input id="mu1" type="range" min="-2.4" max="2.4" step=".02"></label><label class="control"><span>第2维均值 μ₂ <output id="mu2-value"></output></span><input id="mu2" type="range" min="-2.4" max="2.4" step=".02"></label><label class="control"><span>第1维方差 v₁ <output id="var1-value"></output></span><input id="var1" type="range" min=".02" max="1.6" step=".02"></label><label class="control"><span>第2维方差 v₂ <output id="var2-value"></output></span><input id="var2" type="range" min=".02" max="1.6" step=".02"></label><div class="readout" id="space-selected"></div><div class="formula">${eqZ}</div><p class="sub">方差增加会扩大不确定范围；均值移动会改变分布中心。一次样本 z 只是其中一个可能取值。</p></section></div>
  <section class="panel wide-panel"><div class="panel-head"><div><h2>程序里实际操作的是这些数值</h2><p class="sub">每行对应一个细胞，每列对应一个潜坐标。选择不同视图，比较同一形状下数值的含义。</p></div><div class="button-row"><button data-kind="mu" class="small primary">均值 μ</button><button data-kind="variance" class="small">方差 v</button><button data-kind="z" class="small">一次采样 z</button></div></div><div class="table-scroll"><table id="tensor-table"></table></div><p class="tensor-note" id="tensor-note"></p><div class="shape-chain"><b>输入表达：B × 2G</b><span>→</span><b>μ：B × D</b><span>＋</span><b>v：B × D</b><span>→</span><b>一次 Z：B × D</b><span>→</span><b>重复抽 S 次：S × B × D</b></div></section>
- <section class="panel wide-panel"><h2>均值与方差，具体从哪里算出来？</h2><p>默认正态潜变量配置下，先拼接同一细胞的剪接后与未剪接表达，再经过共享编码网络。网络的两个输出头分别给出均值和正方差。</p><div class="formula">${eqEncoder}</div><div class="formula">${eqHeads}<span class="caption">Softplus 是让输出为正的平滑函数。这里的正方差与 10⁻⁴ 稳定项，对应本地 RegVelo 传给 scvi Encoder 的默认设置。</span></div><div id="space-equation-values" class="readout"></div><p class="sub">下面只展开当前细胞的前两个坐标；矩阵表格仍保留全部坐标。方差先开平方，再与噪声逐项相乘。</p></section>
+ <section class="panel wide-panel"><h2>均值与方差，具体从哪里算出来？</h2><p>默认正态潜变量配置下，先拼接同一细胞的剪接后与未剪接表达，再经过共享编码网络。网络的两个输出头分别给出均值和正方差。</p><div class="formula">${eqEncoder}</div><div class="formula">${eqHeads}<span class="caption">Softplus 是让输出为正的平滑函数。这里的正方差与 10⁻⁴ 稳定项，对应本地 RegVelo 传给 scvi Encoder 的默认设置。</span></div><div id="space-equation-values" class="readout"></div><p class="sub">下面只展开当前细胞的前两个坐标；矩阵表格仍保留全部坐标。方差先开平方，再与噪声逐项相乘。</p><p class="sub"><a href="#encoder">去第四页：这两行公式被逐项打印出来，同一批细胞也会同时画在表达空间与潜空间里 →</a></p></section>
  <section class="panel wide-panel"><div class="grid3"><div class="definition"><strong>空间：ℝᴰ</strong><span>所有 D 个实数坐标组成的集合。默认 D=10。坐标轴由模型学习定义，不能仅凭轴编号给它命名为某条生物通路。</span></div><div class="definition"><strong>点：zᵢ ∈ ℝᴰ</strong><span>一个细胞的一次潜变量取值，是长度为 D 的向量。许多细胞的向量可以按行堆成矩阵。</span></div><div class="definition"><strong>分布：qφ(zᵢ|xᵢ)</strong><span>描述这个细胞在潜空间里的可能取值。程序用 μᵢ、vᵢ 定义对角高斯，再从中抽样；图上的云不是额外保存的实体。</span></div></div><div class="formula">${eqQ}</div><div class="callout">潜变量 z、模型输出的逐基因时间 t，以及观测表达 U/S，属于不同对象。z 经过解码器才得到时间；时间再参与动力学计算。</div></section>
  ${sourceDetails()}<section class="recap"><h2>只用文字，重新描述这些对象怎样产生</h2><p>先读取一个细胞的表达数据。编码器据此算出两个长度相同的向量，分别作为均值和方差。它们共同定义这个细胞的近似后验。程序再取一份标准正态噪声，结合均值与方差，得到一个潜变量向量。把各细胞的向量按行放在一起，就得到一批潜变量矩阵；再次抽样时，矩阵数值可以改变，维度含义保持不变。</p></section><div class="page-links"><a href="#training">← 训练怎样改变这些参数</a><a href="#posterior">下一页：后验与近似后验 →</a></div>`;
 
@@ -71,15 +71,15 @@ function dot(g,map,x,y,color,r=3){g.fillStyle=color;g.beginPath();g.arc(map.X(x)
 function updateFormulaLabels(){document.querySelectorAll('math').forEach(el=>{if(!el.getAttribute('aria-label'))el.setAttribute('aria-label',el.textContent.replace(/\s+/g,' '));});}
 function stop(){playing=false;if(timer)clearTimeout(timer);timer=null;if($('run-train'))$('run-train').textContent='开始训练';}
 function renderRoute(){
-  stop();const requested=location.hash.slice(1)||'training';active=['training','space','posterior'].includes(requested)?requested:'training';
-  $('main').innerHTML=active==='training'?trainingHTML():active==='space'?spaceHTML():posteriorHTML();
+  stop();stopEncPlayback();const requested=location.hash.slice(1)||'training';active=['training','space','posterior','encoder'].includes(requested)?requested:'training';
+  $('main').innerHTML=active==='training'?trainingHTML():active==='space'?spaceHTML():active==='encoder'?encoderHTML():posteriorHTML();
   document.querySelectorAll('[data-route]').forEach(a=>a.setAttribute('aria-current',a.dataset.route===active?'page':'false'));
-  document.title=({training:'训练过程',space:'潜空间的存在形式',posterior:'后验与近似后验'}[active])+' · RegVelo 潜空间实验室';
-  if(active==='training')setupTraining();else if(active==='space')setupSpace();else setupPosterior();updateFormulaLabels();
-  window.__latentLab={model,route:active,state:()=>({epoch:model.epoch,space,post}),navigate:route=>{location.hash=route;}};
+  document.title=({training:'训练过程',space:'潜空间的存在形式',posterior:'后验与近似后验',encoder:'编码器：两个空间里的位置'}[active])+' · RegVelo 潜空间实验室';
+  if(active==='training')setupTraining();else if(active==='space')setupSpace();else if(active==='encoder')setupEncoder();else setupPosterior();updateFormulaLabels();
+  window.__latentLab={model,route:active,state:()=>({epoch:model.epoch,space,post,enc:{cell:enc.cell,step:enc.step,proj:enc.proj}}),navigate:route=>{location.hash=route;}};
 }
 window.addEventListener('hashchange',()=>{renderRoute();window.scrollTo(0,0);});
-let resizeTimer;window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>{if(active==='training')refreshTraining();else if(active==='space')refreshSpace();else refreshPosterior();},100);});
+let resizeTimer;window.addEventListener('resize',()=>{clearTimeout(resizeTimer);resizeTimer=setTimeout(()=>{if(active==='training')refreshTraining();else if(active==='space')refreshSpace();else if(active==='encoder')refreshEncoder();else refreshPosterior();},100);});
 
 // Page-specific interactions are defined below. The shared model stays in browser memory.
 let trainViewMode='inspect';
@@ -176,6 +176,304 @@ function refreshPosterior(){
   const curves=[[0,1,palette.blue,false],[p.mu,p.sd,palette.teal,false],[post.mu,post.sd,palette.pink,true]];
   for(const [mu,sd,color,dashed] of curves){g.beginPath();g.strokeStyle=color;g.lineWidth=2.2;g.setLineDash(dashed?[6,4]:[]);for(let i=0;i<=400;i++){const x=xmin+(xmax-xmin)*i/400,y=gaussian(x,mu,sd);i?g.lineTo(map.X(x),map.Y(y)):g.moveTo(map.X(x),map.Y(y));}g.stroke();}g.setLineDash([]);
   g.fillStyle=palette.text;g.textAlign='right';g.fillText('每条密度曲线下的总面积为 1',w-20,18);
+}
+
+// ---------- page 04: one cell, two spaces, one forward pass ----------------
+const encStage=['读取观测','拼接与缩放','均值头 μ','方差头 v','重参数化 z','写入潜空间'];
+const encStageText=[
+ '从教学数据里取出一个细胞的四个读取值：两个基因各自的未剪接与已剪接表达。它们是观测，训练不会移动它们。',
+ '真实 RegVelo 把已剪接与未剪接表达拼成一条长向量再送进编码器。这里同样先拼成 [s_A, s_B, u_A, u_B]，再除以 2 缩放到教学模型使用的尺度。',
+ '均值头是两组各 4 个权重的加权求和再加偏置，一次算出两个潜坐标。教学模型没有隐藏层，所以这一步就是一次 2×4 的矩阵乘法。',
+ '方差头用另一组权重做同样的加权求和，结果可能为负。Softplus 把它变成正数，再加 10⁻⁴ 让方差远离零。',
+ '抽取标准正态噪声 ε，把开方后的方差与它逐坐标相乘，再加到均值上。这是重参数化：固定 ε 时 z 仍可对 μ 与 v 求导。',
+ '把 μ 与 z 写进潜空间的坐标。十个细胞用同一组权重、各自不同的 x，于是各自得到自己的位置。'
+];
+const projections={
+ sA_uA:{label:'基因 A：s_A – u_A',x:0,y:2,xname:'s_A',yname:'u_A'},
+ sA_sB:{label:'两个基因：s_A – s_B',x:0,y:1,xname:'s_A',yname:'s_B'},
+ uA_uB:{label:'两个基因：u_A – u_B',x:2,y:3,xname:'u_A',yname:'u_B'},
+ sB_uB:{label:'基因 B：s_B – u_B',x:1,y:3,xname:'s_B',yname:'u_B'},
+ pca:{label:'前两个主方向 PC₁ – PC₂',pca:true,xname:'PC₁',yname:'PC₂'}
+};
+const eqLinear=M('<msub><mi>μ</mi><mi>i</mi></msub><mo>=</mo><msub><mi>W</mi><mi>μ</mi></msub><msub><mi>x</mi><mi>i</mi></msub><mo>+</mo><msub><mi>b</mi><mi>μ</mi></msub><mo>,</mo><mspace width=".6em"/><msub><mi>v</mi><mi>i</mi></msub><mo>=</mo><mi>Softplus</mi><mo>(</mo><msub><mi>W</mi><mi>v</mi></msub><msub><mi>x</mi><mi>i</mi></msub><mo>+</mo><msub><mi>b</mi><mi>v</mi></msub><mo>)</mo><mo>+</mo><msup><mn>10</mn><mrow><mo>−</mo><mn>4</mn></mrow></msup>');
+const encoderSourceDetails=()=>`<details><summary>这一页的数字与本地 RegVelo 源码怎样对应？</summary><p>下表只对齐“一次编码器前向”这件事。左边是本地源码的位置，右边是这份浏览器教学模型的做法；两者形状相同，规模小得多。</p><div class="table-scroll"><table><thead><tr><th>环节</th><th>本地定位</th><th>这份教学模型</th></tr></thead><tbody><tr><td>输入拼接</td><td class="source-path">_module.py:676-684</td><td>4 维：s_A、s_B、u_A、u_B，各自除以 2</td></tr><tr><td>编码网络</td><td class="source-path">_module.py:531-545</td><td>无隐藏层、无归一化的一次线性映射</td></tr><tr><td>均值头 / 方差头</td><td class="source-path">scvi _base_components.py:283-290</td><td>两个线性头；方差用 Softplus + 10⁻⁴</td></tr><tr><td>抽样</td><td class="source-path">_base_components.py:286-287</td><td>固定 ε 的重参数化，便于逐页对照同一个 z</td></tr><tr><td>多次抽样</td><td class="source-path">_module.py:686-691</td><td>本页只抽一次，不展开 n_samples 维度</td></tr><tr><td>潜变量维数</td><td class="source-path">_module.py:444-445（n_latent = 10）</td><td>2 维，才能直接画在平面上</td></tr></tbody></table></div><p>本地编码器在拼接前还可能做 <span class="source-path">log(0.01 + x)</span> 变换，并带 BatchNorm 与 ReLU 隐藏层；这里都没有实现。所以本页列出的权重不是 RegVelo 的训练结果，只是一份能逐项写出来的教学参数。</p></details>`;
+
+const encoderHTML=()=>hero('04','一个细胞，两张空间里的两个位置','左边是表达空间：每个坐标都是一个读取值，位置来自观测，训练不会移动它。右边是潜空间：位置不是观测值，而是编码器当场算出来的。中间那条带子对应一次真实的前向计算，下面的数字把这次计算拆成六步。','<strong>对应只有一条规则</strong>同一个细胞、同一组编码器权重，得到同一个均值 μ；同一份噪声 ε，得到同一个样本 z。')+`
+ <div class="toolbar"><div class="button-row">
+   <label class="sub">观察哪个细胞 <select id="enc-cell">${model.data.map((c,i)=>`<option value="${i}">${c.name}</option>`).join('')}</select></label>
+   <label class="sub">表达空间的两条轴 <select id="enc-proj">${Object.entries(projections).map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select></label>
+   <button id="enc-step" class="primary">逐步运行编码器</button>
+   <button id="enc-auto">自动播放</button>
+   <label class="check"><input id="enc-all" type="checkbox">显示全部对应带</label>
+ </div><span class="tag amber" id="enc-state">模型状态</span></div>
+ <section class="panel">
+  <div class="panel-head"><div><h2>表达空间 → 编码器 → 潜空间</h2><p class="sub">两块各画十个细胞，编号相同的就是同一个细胞。点图上的任意一点，两侧同时切换。两块各自使用自己的刻度，因此不要把两张图上的像素距离直接相减。</p></div><span class="tag" id="enc-step-tag">第 6 步 / 共 6 步</span></div>
+  <canvas id="enc-canvas" class="chart stage-chart" role="img" aria-label="左侧为表达空间中的十个教学细胞，中间为编码器，右侧为它们在潜空间中的对应位置"></canvas>
+  <div class="legend"><span><i></i>细胞在表达空间的位置（观测）</span><span><i class="amber"></i>选中细胞的潜均值 μ 与 1σ 轮廓</span><span><i class="pink"></i>本次抽到的 z</span><span><i class="ghost"></i>更新前的潜位置</span></div>  <p class="status" id="enc-status" role="status">先点“逐步运行编码器”，或直接点图上的一个细胞。</p>
+ </section>
+ <div class="flow six" aria-label="编码器前向的六个阶段">${encStage.map((s,i)=>`<button data-enc="${i}" class="${i===5?'active':''}">${i+1}. ${s}<span>${['四个读取值','4 维向量','2 个均值','2 个方差','一个样本','μ 与 z'][i]}</span></button>`).join('')}</div>
+ <div class="step-explanation" id="enc-note">${encStageText[5]}</div>
+ <section class="panel wide-panel">
+  <div class="panel-head"><div><h2>这一次前向计算的完整算术</h2><p class="sub">数字由当前参数直接算出；训练之后，同一个细胞的每个数字都会变。显示时四舍五入到 3 位，所以手算末位可能与“=”后面的结果相差 0.001。</p></div><span class="tag gray">当前参数 · 不更新</span></div>
+  <div class="trace" id="enc-trace"></div>
+ </section>
+ <section class="panel wide-panel">
+  <div class="panel-head"><div><h2>编码器的全部参数：两张 2 × 4 的表</h2><p class="sub">教学模型没有隐藏层，所以“编码器”就是把 4 个输入各乘一次权重再相加。当前细胞的输入 x 单独列在上方，便于逐列核对。</p></div><span class="tag" id="enc-param-tag">初始随机参数</span></div>
+  <div class="grid2"><div><h3>均值头：μ_d = b_d + Σ_j W_dj · x_j</h3><div class="table-scroll"><table id="enc-mu-table"></table></div></div><div><h3>方差头：v_d = Softplus(a_d) + 10⁻⁴</h3><div class="table-scroll"><table id="enc-v-table"></table></div></div></div>
+  <p class="tensor-note">本地 RegVelo 的编码器是同一个形式，只是中间多了一层或几层 ReLU 隐藏层（默认每层 256 个单元），输出 10 维而不是 2 维。隐藏层一旦加上，每个输出就不再只对应 4 个权重，而是整条中间向量；本页去掉它，才能把算术写在一张表里。</p>
+ </section>
+ <section class="panel wide-panel">
+  <div class="panel-head"><div><h2>十个细胞，同一组权重</h2><p class="sub">一行就是一个细胞：左边四列是它在表达空间里的坐标，右边六列是编码器给出的参数与本次样本。点一行可以在上面的图里定位同一个细胞。</p></div><span class="tag" id="enc-shape-tag">X 10 × 4 → μ 10 × 2</span></div>
+  <div class="table-scroll"><table id="enc-cells"></table></div>
+  <div class="shape-chain"><b>表达 X：10 × 4</b><span>→</span><b>均值 μ：10 × 2</b><span>＋</span><b>方差 v：10 × 2</b><span>→</span><b>样本 z：10 × 2</b><span>→</span><b>解码器</b><span>→</span><b>逐基因时间与动力学</b></div>
+ </section>
+ <section class="panel wide-panel">
+  <div class="panel-head"><div><h2>两个空间的“位置”不能直接相减</h2><p class="sub">45 对细胞：横轴是它们在 4 维输入里的距离，纵轴是它们在 2 维潜空间里的距离。每一点是一对细胞；橙色点表示这一对里有当前选中的细胞。</p></div><span class="tag" id="enc-corr-tag"></span></div>
+  <canvas id="enc-dist-chart" class="chart" role="img" aria-label="细胞对在表达空间与潜空间中的距离散点图"></canvas>
+  <p class="tensor-note" id="enc-dist-note"></p>
+ </section>
+ <section class="panel wide-panel">
+  <div class="panel-head"><div><h2>训练移动的是编码器，不是观测</h2><p class="sub">点一次会在这个模型上做 40 次真实更新，与训练页共用同一份模型，所以那边的更新计数会同步增加。左图十个位置一个都不会动；右图会重新排布，因为决定映射的权重变了。</p></div></div>
+  <div class="button-row"><button id="enc-train" class="primary">真实更新 40 步</button><button id="enc-clear-ghost">清除更新前的叠加</button></div>
+  <p class="status" id="enc-train-status" role="status">还没有执行本页的更新。</p>
+ </section>
+ <section class="panel wide-panel"><h2>把这条通路写成公式</h2><div class="formula">${eqEncoder}</div><div class="formula">${eqLinear}<span class="caption">教学模型：没有隐藏层，均值与方差各是一次线性变换。方差头先算出 a，再经 Softplus 变正。</span></div><div class="formula">${eqHeads}<span class="caption">本地 RegVelo 的形式：隐藏向量 h_i = f_φ(x_i) 由 ReLU 隐藏层给出，两个头接在隐藏向量上。方差仍用 Softplus 与 10⁻⁴。</span></div><div class="callout">“对应上”精确地说只有三件事：同一个细胞的 x 被同一组权重读入；编码器因此给出同一个 μ；加上同一份 ε 才得到同一个 z。它不蕴含“基因空间近的细胞在潜空间也近”，也不蕴含坐标轴有生物含义。</div></section>
+ ${encoderSourceDetails()}
+ <section class="recap"><h2>只用文字，把一次编码走一遍</h2><p>先从观测表里取一个细胞的四个表达值，拼成一条 4 维向量并缩放到模型尺度。均值头用 8 个权重和 2 个偏置各做一次加权求和，得到 2 个潜坐标；方差头用另外 8 个权重做同样的求和，经 Softplus 变正，再各加 10⁻⁴。随后抽一份标准正态噪声，把标准差与它逐坐标相乘，加到均值上，得到一个样本 z。μ 与 z 就是同一个细胞在潜空间里的两个位置：μ 是确定的中心，z 是这一次抽到的点。十个细胞重复这同一套权重，就得到两张可以并排查看的位置表；训练改变的是权重，所以右图会动，左图不会。</p></section>
+ <div class="page-links"><a href="#posterior">← 后验与近似后验</a><span>04 / 04</span><a href="#training">回到训练：这些权重怎样被更新 →</a></div>`;
+
+let enc={cell:0,step:5,playing:false,timer:null,proj:'sA_uA',ghost:null,all:false};
+const encRows=()=>model.data.map((_,i)=>encoderTrace(model,i));
+function stopEncPlayback(){enc.playing=false;if(enc.timer)clearTimeout(enc.timer);enc.timer=null;if($('enc-auto'))$('enc-auto').textContent='自动播放';}
+function roundRectPath(g,x,y,w,h,r){const rr=Math.min(r,Math.min(w,h)/2);g.beginPath();g.moveTo(x+rr,y);g.lineTo(x+w-rr,y);g.quadraticCurveTo(x+w,y,x+w,y+rr);g.lineTo(x+w,y+h-rr);g.quadraticCurveTo(x+w,y+h,x+w-rr,y+h);g.lineTo(x+rr,y+h);g.quadraticCurveTo(x,y+h,x,y+h-rr);g.lineTo(x,y+rr);g.quadraticCurveTo(x,y,x+rr,y);g.closePath();}
+function frameBox(rect){
+  const l=rect.x+43,t=rect.y+42,r=rect.x+rect.w-11,b=rect.y+rect.h-19;
+  return {l,t,r,b,iw:r-l,ih:b-t};
+}
+// Fit both axes with ONE scale so a circle stays a circle: the visible span of
+// each axis follows from the plot aspect instead of being forced equal.
+function fitRange(pts,pad,iw,ih){
+  let x0=Math.min(...pts.map(p=>p[0])),x1=Math.max(...pts.map(p=>p[0]));
+  let y0=Math.min(...pts.map(p=>p[1])),y1=Math.max(...pts.map(p=>p[1]));
+  let dx=x1-x0,dy=y1-y0;
+  const floor=Math.max(1e-3,Math.max(Math.abs(x0),Math.abs(x1),Math.abs(y0),Math.abs(y1))*.05);
+  if(!(dx>1e-9))dx=floor;
+  if(!(dy>1e-9))dy=floor;
+  dx*=1+2*pad;dy*=1+2*pad;
+  const s=Math.min(iw/dx,ih/dy),sx=iw/s,sy=ih/s,cx=(x0+x1)/2,cy=(y0+y1)/2;
+  return {xmin:cx-sx/2,xmax:cx+sx/2,ymin:cy-sy/2,ymax:cy+sy/2,spanX:sx,spanY:sy,halfX:sx/2,halfY:sy/2};
+}
+function drawFrame(g,rect,o){
+  const {xmin,xmax,ymin,ymax}=o;
+  g.save();roundRectPath(g,rect.x,rect.y,rect.w,rect.h,10);g.fillStyle='#fff';g.fill();g.strokeStyle='#e3e9ec';g.lineWidth=1;g.stroke();g.restore();
+  g.textAlign='left';g.font='600 12.5px "Microsoft YaHei",sans-serif';g.fillStyle='#14273d';g.fillText(o.title,rect.x+11,rect.y+17);
+  g.font='10.5px "Microsoft YaHei",sans-serif';g.fillStyle='#687989';g.fillText(o.sub,rect.x+11,rect.y+31);
+  const {l,t,r,b,iw,ih}=frameBox(rect);
+  const X=x=>l+(x-xmin)/(xmax-xmin)*iw,Y=y=>b-(y-ymin)/(ymax-ymin)*ih;
+  const n=iw<130?2:iw<210?3:4;
+  g.strokeStyle='#e9eef1';g.lineWidth=1;g.font='10px "Microsoft YaHei",sans-serif';g.fillStyle='#8294a1';g.textAlign='center';
+  const dec=Math.abs(xmax-xmin)>4?0:2;
+  const tickTxt=v=>fmt(Math.abs(v)<Math.pow(10,-dec)/2?0:v,dec);
+  for(let i=0;i<=n;i++){
+    const xv=xmin+(xmax-xmin)*i/n,yv=ymin+(ymax-ymin)*i/n;
+    g.beginPath();g.moveTo(X(xv),t);g.lineTo(X(xv),b);g.stroke();
+    g.fillText(tickTxt(xv),X(xv),b+12);
+    g.beginPath();g.moveTo(l,Y(yv));g.lineTo(r,Y(yv));g.stroke();
+    g.textAlign='right';g.fillText(tickTxt(yv),l-5,Y(yv)+3.5);g.textAlign='center';
+  }
+  return {X,Y,l,t,r,b,iw,ih};
+}
+function encLayout(w,h){
+  const wide=w>=600;
+  if(wide){
+    const pad=10,gap=Math.min(168,Math.max(110,w*.14)),pw=(w-2*pad-gap)/2,top=6;
+    return {wide,gene:{x:pad,y:top,w:pw,h:h-top-6},bridge:{x:pad+pw,y:top,w:gap,h:h-top-6},latent:{x:pad+pw+gap,y:top,w:pw,h:h-top-6}};
+  }
+  const pad=8,gapY=78,ph=(h-2*pad-gapY)/2;
+  return {wide,gene:{x:pad,y:pad,w:w-2*pad,h:ph},bridge:{x:pad,y:pad+ph,w:w-2*pad,h:gapY},latent:{x:pad,y:pad+ph+gapY,w:w-2*pad,h:ph}};
+}
+function drawBridge(g,rect,wide){
+  g.save();roundRectPath(g,rect.x,rect.y,rect.w,rect.h,12);g.fillStyle='#f2f7f7';g.fill();g.strokeStyle='#d8e6e7';g.lineWidth=1;g.stroke();g.restore();
+  g.textAlign='center';
+  if(wide){
+    const cx=rect.x+rect.w/2;
+    g.fillStyle='#14273d';g.font='600 12.5px "Microsoft YaHei",sans-serif';g.fillText('编码器 f_φ',cx,rect.y+20);
+    g.font='10.5px "Microsoft YaHei",sans-serif';g.fillStyle='#087d86';g.fillText(encStage[enc.step],cx,rect.y+36);
+    g.font='10px ui-monospace,Consolas,monospace';g.fillStyle='#7b8b98';
+    g.fillText('μ = W x + b',cx,rect.y+58);
+    g.fillText('v = Softplus(a) + 1e-4',cx,rect.y+72);
+    const cy=rect.y+rect.h*.51,inX=cx-Math.min(46,rect.w*.3),outX=cx+Math.min(46,rect.w*.3);
+    const y4=[-1.5,-.5,.5,1.5].map(k=>cy+k*Math.min(34,rect.h*.085)),y2=[-1,1].map(k=>cy+k*Math.min(24,rect.h*.06));
+    g.strokeStyle='#c6d8dc';g.lineWidth=1;
+    for(const a of y4)for(const b of y2){g.beginPath();g.moveTo(inX,a);g.lineTo(outX,b);g.stroke();}
+    for(const y of y4){g.beginPath();g.arc(inX,y,5.4,0,Math.PI*2);g.fillStyle='#fff';g.fill();g.strokeStyle='#9cb9bd';g.lineWidth=1.2;g.stroke();}
+    for(const y of y2){g.beginPath();g.arc(outX,y,6.4,0,Math.PI*2);g.fillStyle='#e9f5f3';g.fill();g.strokeStyle='#087d86';g.lineWidth=1.4;g.stroke();}
+    g.font='10px "Microsoft YaHei",sans-serif';g.fillStyle='#607080';
+    g.fillText('4 个输入',inX,y4[3]+19);g.fillText('μ 与 v',outX,y2[1]+19);
+    g.fillText('x',inX-14,cy-2);
+  }else{
+    g.textAlign='left';g.fillStyle='#14273d';g.font='600 12px "Microsoft YaHei",sans-serif';g.fillText('编码器 f_φ',rect.x+12,rect.y+21);
+    g.textAlign='right';g.fillStyle='#687989';g.font='10.5px "Microsoft YaHei",sans-serif';g.fillText('4 维 x → 2 维 μ, v',rect.x+rect.w-12,rect.y+21);
+    g.textAlign='left';g.fillStyle='#087d86';g.fillText(encStage[enc.step],rect.x+12,rect.y+38);
+    const cx=rect.x+rect.w/2;
+    g.strokeStyle='#c6d8dc';g.lineWidth=1.2;g.setLineDash([4,4]);
+    g.beginPath();g.moveTo(cx,rect.y+48);g.lineTo(cx,rect.y+rect.h-13);g.stroke();g.setLineDash([]);
+    g.beginPath();g.moveTo(cx-4,rect.y+rect.h-18);g.lineTo(cx,rect.y+rect.h-10);g.lineTo(cx+4,rect.y+rect.h-18);g.stroke();
+  }
+}
+function bezierPoint(p0,c1,c2,p3,t){const u=1-t;return {x:u*u*u*p0.x+3*u*u*t*c1.x+3*u*t*t*c2.x+t*t*t*p3.x,y:u*u*u*p0.y+3*u*u*t*c1.y+3*u*t*t*c2.y+t*t*t*p3.y};}
+let encHit=[];
+function drawEncoderStage(rows){
+  const cvs=canvas('enc-canvas');if(!cvs.g)return;
+  const {g,w,h}=cvs;encHit=[];
+  const L=encLayout(w,h),gp=encGenePoints(rows),lat=rows.map(r=>r.mu.value),sel=rows[enc.cell];
+  const gb=frameBox(L.gene),lb=frameBox(L.latent);
+  const gR=fitRange(gp.pts,.14,gb.iw,gb.ih);
+  let lR=fitRange(lat,.18,lb.iw,lb.ih);
+  // Include the sampled z only when that does not squash the cloud of means.
+  if(enc.step>=4){
+    const withZ=fitRange([...lat,sel.z],.18,lb.iw,lb.ih);
+    if(withZ.spanX<=lR.spanX*1.7&&withZ.spanY<=lR.spanY*1.7)lR=withZ;
+  }
+  const gMap=drawFrame(g,L.gene,{title:'表达空间（观测）',sub:`横 ${gp.xname} · 纵 ${gp.yname} · 已 ÷2`,...gR});
+  const lMap=drawFrame(g,L.latent,{title:'潜空间（编码器输出）',sub:'横 μ₁ · 纵 μ₂ · 与 z 同一组刻度',...lR});
+  drawBridge(g,L.bridge,L.wide);
+  const bez=(i)=>{
+    const p0={x:gMap.X(gp.pts[i][0]),y:gMap.Y(gp.pts[i][1])},p3={x:lMap.X(lat[i][0]),y:lMap.Y(lat[i][1])};
+    const off=L.wide?Math.min(64,L.bridge.w*.55):34;
+    const c1=L.wide?{x:p0.x+off,y:p0.y}:{x:p0.x,y:p0.y+off};
+    const c2=L.wide?{x:p3.x-off,y:p3.y}:{x:p3.x,y:p3.y-off};
+    return {p0,c1,c2,p3};
+  };
+  const strokeBez=b=>{g.beginPath();g.moveTo(b.p0.x,b.p0.y);g.bezierCurveTo(b.c1.x,b.c1.y,b.c2.x,b.c2.y,b.p3.x,b.p3.y);g.stroke();};
+  if(enc.all&&enc.step>=1){
+    for(let i=0;i<rows.length;i++){const on=i===enc.cell;g.strokeStyle=on?'#ae6b13':'#087d86';g.globalAlpha=on?.6:.2;g.lineWidth=on?2:1;g.setLineDash(on?[]:[4,4]);strokeBez(bez(i));g.setLineDash([]);g.globalAlpha=1;}
+  }else if(enc.step>=1){g.strokeStyle='#ae6b13';g.globalAlpha=.5;g.lineWidth=2;strokeBez(bez(enc.cell));g.globalAlpha=1;}
+  g.save();g.beginPath();g.rect(lMap.l,lMap.t,lMap.iw,lMap.ih);g.clip();
+  if(enc.ghost){enc.ghost.forEach(([x,y],i)=>{const px=lMap.X(x),py=lMap.Y(y);g.strokeStyle='rgba(154,169,180,.7)';g.setLineDash([3,3]);g.lineWidth=1;g.beginPath();g.arc(px,py,3.4,0,Math.PI*2);g.stroke();if(i===enc.cell){g.beginPath();g.moveTo(px,py);g.lineTo(lMap.X(lat[i][0]),lMap.Y(lat[i][1]));g.strokeStyle='rgba(154,169,180,.9)';g.stroke();}g.setLineDash([]);});}
+  const sd=sel.variance.sd,ellipseFits=sd[0]<=lR.halfX&&sd[1]<=lR.halfY;
+  if(enc.step>=3&&ellipseFits){const cx=sel.mu.value[0],cy=sel.mu.value[1];g.save();g.globalAlpha=.85;g.strokeStyle='#ae6b13';g.lineWidth=1.4;g.beginPath();for(let k=0;k<=96;k++){const a=k/96*Math.PI*2,x=lMap.X(cx+sd[0]*Math.cos(a)),y=lMap.Y(cy+sd[1]*Math.sin(a));k?g.lineTo(x,y):g.moveTo(x,y);}g.stroke();g.restore();}
+  let zOutside=false,zPx=0,zPy=0;
+  if(enc.step>=4){
+    const zx=sel.z[0],zy=sel.z[1],inside=zx>=lR.xmin&&zx<=lR.xmax&&zy>=lR.ymin&&zy<=lR.ymax;
+    zPx=lMap.X(Math.min(lR.xmax,Math.max(lR.xmin,zx)));zPy=lMap.Y(Math.min(lR.ymax,Math.max(lR.ymin,zy)));
+    g.beginPath();g.arc(zPx,zPy,4.6,0,Math.PI*2);
+    if(inside){g.fillStyle='#ae4774';g.fill();g.strokeStyle='#fff';g.lineWidth=1.6;g.stroke();}
+    else{zOutside=true;g.strokeStyle='#ae4774';g.lineWidth=1.6;g.setLineDash([3,3]);g.stroke();g.setLineDash([]);}
+  }
+  g.restore();
+  const labelAt=(txt,color,px,py,dy)=>{
+    g.font='10px "Microsoft YaHei",sans-serif';g.fillStyle=color;g.textAlign='left';
+    const mt=g.measureText?g.measureText(txt):null,tw=mt&&mt.width?mt.width:txt.length*8.4;
+    g.fillText(txt,Math.max(lMap.l+2,Math.min(px+9,lMap.r-4-tw)),Math.max(lMap.t+10,Math.min(py+dy,lMap.b-4)));
+  };
+  if(enc.step>=3&&!ellipseFits)labelAt('1σ 轮廓在框外','#ae6b13',lMap.X(sel.mu.value[0]),lMap.Y(sel.mu.value[1]),14);
+  if(zOutside)labelAt('z 在框外','#ae4774',zPx,zPy,14);
+  gp.pts.forEach(([x,y],i)=>{
+    const px=gMap.X(x),py=gMap.Y(y),on=i===enc.cell;
+    encHit.push({x:px,y:py,i});
+    g.beginPath();g.arc(px,py,on?6.2:4.2,0,Math.PI*2);g.fillStyle=on?'#ae6b13':'#087d86';g.fill();g.strokeStyle='#fff';g.lineWidth=on?2:1.4;g.stroke();
+    g.fillStyle=on?'#7b4a0a':'#465c6b';g.font=(on?'600 ':'')+'10px "Microsoft YaHei",sans-serif';g.textAlign='left';g.fillText(String(i+1),px+7,py-6);
+  });
+  lat.forEach(([x,y],i)=>{
+    const px=lMap.X(x),py=lMap.Y(y),on=i===enc.cell;
+    if(on&&enc.step<2)return;
+    encHit.push({x:px,y:py,i});
+    g.beginPath();g.arc(px,py,on?5.6:3.6,0,Math.PI*2);g.fillStyle=on?'#ae6b13':'#087d86';g.fill();g.strokeStyle='#fff';g.lineWidth=on?2:1.2;g.stroke();
+    g.fillStyle=on?'#7b4a0a':'#465c6b';g.font=(on?'600 ':'')+'10px "Microsoft YaHei",sans-serif';g.textAlign='left';g.fillText(String(i+1),px+7,py-6);
+  });
+  if(enc.step>=1){const b=bez(enc.cell),pt=bezierPoint(b.p0,b.c1,b.c2,b.p3,[0,.14,.52,.74,.92,1][enc.step]);g.beginPath();g.arc(pt.x,pt.y,4.6,0,Math.PI*2);g.fillStyle='#db982c';g.fill();g.strokeStyle='#fff';g.lineWidth=1.6;g.stroke();}
+}
+function encGenePoints(rows){
+  if(enc.proj==='pca'){
+    const p=pca2(rows.map(r=>r.x));
+    return {pts:p.scores,xname:'PC₁',yname:'PC₂',note:`PC₁ 解释 ${fmt(p.explained[0]*100,1)}% 的方差，PC₂ 只有 ${fmt(p.explained[1]*100,1)}%：这批教学细胞几乎只沿一条轨迹变化。`};
+  }
+  const pr=projections[enc.proj]||projections.sA_uA;
+  return {pts:rows.map(r=>[r.x[pr.x],r.x[pr.y]]),xname:pr.xname,yname:pr.yname,note:'每条轴是一个“基因 × 模态”的读取值；另外两个坐标没有画出，见下面的表格。'};
+}
+function traceHTML(sel){
+  const n3=v=>fmt(v,3),n4=v=>fmt(v,4);
+  const sgn=v=>v<0?' - ':' + ';
+  const prod=terms=>terms.map(t=>` + (${n3(t[0])}) × ${n3(t[1])}`).join('');
+  const sumLine=(b,terms)=>n3(b)+terms.map(t=>sgn(t[2])+n3(Math.abs(t[2]))).join('');
+  const muLines=[0,1].map(d=>`μ${d+1} = ${n3(sel.mu.b[d])}${prod(sel.mu.terms[d])}\n    = ${sumLine(sel.mu.b[d],sel.mu.terms[d])} = ${n3(sel.mu.value[d])}`).join('\n\n');
+  const vLines=[0,1].map(d=>`a${d+1} = ${n3(sel.variance.b[d])}${prod(sel.variance.terms[d])}\n    = ${sumLine(sel.variance.b[d],sel.variance.terms[d])} = ${n3(sel.variance.pre[d])}\nv${d+1} = Softplus(${n3(sel.variance.pre[d])}) + 0.0001 = ${n4(sel.variance.act[d])} + 0.0001 = ${n4(sel.variance.value[d])}`).join('\n\n');
+  const zLines=`ε = [${sel.eps.map(v=>n3(v)).join(', ')}]\n`+[0,1].map(d=>`z${d+1} = μ${d+1} + √v${d+1} × ε${d+1} = ${n3(sel.mu.value[d])} + ${n3(sel.variance.sd[d])} × ${n3(sel.eps[d])} = ${n3(sel.z[d])}`).join('\n');
+  const body=[
+    `细胞 ${sel.i+1}　s_A = ${n3(sel.obs.s[0])}　s_B = ${n3(sel.obs.s[1])}\n         u_A = ${n3(sel.obs.u[0])}　u_B = ${n3(sel.obs.u[1])}`,
+    `x = [s_A, s_B, u_A, u_B] ÷ 2\n  = [${sel.x.map(v=>n3(v)).join(', ')}]　（4 维）`,
+    muLines,vLines,zLines,
+    `表达空间位置（4 维）：[${sel.x.map(v=>n3(v)).join(', ')}]\n潜空间中心 μ（2 维）：[${sel.mu.value.map(v=>n3(v)).join(', ')}]\n本次样本 z（2 维）：[${sel.z.map(v=>n3(v)).join(', ')}]`
+  ];
+  const heads=['读取观测','拼接与缩放 → x','均值头 → μ','方差头 → v','重参数化 → z','两个空间里的位置'];
+  return body.map((b,k)=>`<div class="trace-block ${enc.step>=k?'done':'pending'}"><div class="trace-head"><span class="trace-idx">${k+1}</span>${heads[k]}</div><div class="trace-body mono">${b}</div></div>`).join('');
+}
+function headTable(sel,key){
+  const blk=key==='mu'?sel.mu:sel.variance;
+  const names=key==='mu'?['μ₁','μ₂']:['a₁','a₂'];
+  const cols=['W · s_A','W · s_B','W · u_A','W · u_B'];
+  const out=key==='mu'?blk.value:blk.pre;
+  return `<thead><tr><th>输出</th><th>偏置 b</th>${cols.map(c=>`<th>${c}</th>`).join('')}<th>${key==='mu'?'μ_d':'a_d'}</th></tr></thead><tbody><tr class="xrow"><td>当前 x</td><td>—</td>${sel.x.map(v=>`<td>${fmt(v,3)}</td>`).join('')}<td>—</td></tr>${names.map((nm,d)=>`<tr><td>${nm}</td><td>${fmt(blk.b[d],3)}</td>${blk.w[d].map(v=>`<td>${fmt(v,3)}</td>`).join('')}<td>${fmt(out[d],3)}</td></tr>`).join('')}</tbody>`;
+}
+function cellsTable(rows){
+  const head='<thead><tr><th>细胞</th><th>s_A</th><th>s_B</th><th>u_A</th><th>u_B</th><th>μ₁</th><th>μ₂</th><th>v₁</th><th>v₂</th><th>z₁</th><th>z₂</th></tr></thead>';
+  return head+'<tbody>'+rows.map((r,i)=>`<tr data-cell="${i}" class="${i===enc.cell?'selected':''}"><td>${r.name}</td>${r.raw.map(v=>`<td>${fmt(v,3)}</td>`).join('')}${r.mu.value.map(v=>`<td class="val-${v<0?'negative':'positive'}">${fmt(v,3)}</td>`).join('')}${r.variance.value.map(v=>`<td>${fmt(v,3)}</td>`).join('')}${r.z.map(v=>`<td class="val-${v<0?'negative':'positive'}">${fmt(v,3)}</td>`).join('')}</tr>`).join('')+'</tbody>';
+}
+function drawEncoderDistance(){
+  const cvs=canvas('enc-dist-chart');if(!cvs.g)return;
+  const {g,w,h}=cvs,geo=pairwiseGeometry(model),xs=geo.pairs.map(p=>p.dx),ys=geo.pairs.map(p=>p.dm);
+  const map=axes(g,w,h,{xmin:0,xmax:Math.max(.05,Math.max(...xs)*1.08),ymin:0,ymax:Math.max(.05,Math.max(...ys)*1.1),xlabel:'表达空间距离（4 维输入）',ylabel:'潜空间距离（2 维 μ）',ticks:4});
+  for(const p of geo.pairs){const on=p.i===enc.cell||p.j===enc.cell;dot(g,map,p.dx,p.dm,on?palette.amber:palette.teal,on?3.4:2.3);}
+  g.textAlign='right';g.font='11px "Microsoft YaHei",sans-serif';g.fillStyle=palette.text;g.fillText(`45 对细胞 · Pearson r = ${fmt(geo.r,3)}`,w-20,15);
+  $('enc-corr-tag').textContent=`r = ${fmt(geo.r,3)}`;
+  const far=geo.pairs.reduce((a,b)=>b.dx>a.dx?b:a),near=geo.pairs.reduce((a,b)=>b.dx<a.dx?b:a);
+  $('enc-dist-note').textContent=`最远的一对是细胞 ${far.i+1} 与 ${far.j+1}：表达空间 ${fmt(far.dx,3)}，潜空间 ${fmt(far.dm,3)}；最近的一对是细胞 ${near.i+1} 与 ${near.j+1}：${fmt(near.dx,3)} 对 ${fmt(near.dm,3)}。这份教学数据只有时间在变，十个细胞几乎落在同一条轨迹上，所以两个空间的距离看起来近似成比例。换成有分化结构的真实数据，这种比例不会被保证：编码器只保证同一个细胞得到同一个位置，不保证距离按比例缩短。`;
+}
+function encStatusText(rows,sel){
+  const lat=rows.map(r=>r.mu.value);
+  const spread=Math.max(Math.max(...lat.map(p=>p[0]))-Math.min(...lat.map(p=>p[0])),Math.max(...lat.map(p=>p[1]))-Math.min(...lat.map(p=>p[1])));
+  const sd=Math.max(...sel.variance.sd);
+  const note=sd>spread*.7?`注意：这个细胞的标准差最大是 ${fmt(sd,2)}，比十个潜均值的整体散布（${fmt(spread,2)}）还大。当前编码器几乎没有把细胞分开，所以它的 1σ 轮廓整个落在画框外，图上用文字标注。做一次“真实更新 40 步”再回来看。`:'';
+  return `${sel.name}：x → μ = [${sel.mu.value.map(v=>fmt(v,3)).join(', ')}]，z = [${sel.z.map(v=>fmt(v,3)).join(', ')}]。${note}`;
+}
+function refreshEncoder(){
+  const rows=encRows(),sel=rows[enc.cell];
+  $('enc-cell').value=String(enc.cell);$('enc-proj').value=enc.proj;$('enc-all').checked=enc.all;
+  $('enc-state').textContent=model.epoch?`模型已更新 ${model.epoch} 次`:'模型尚未训练';
+  $('enc-param-tag').textContent=model.epoch?`参数已更新 ${model.epoch} 次`:'初始随机参数';
+  $('enc-step-tag').textContent=`第 ${enc.step+1} / 6 步`;
+  document.querySelectorAll('[data-enc]').forEach(b=>b.classList.toggle('active',Number(b.dataset.enc)===enc.step));
+  $('enc-note').textContent=encStageText[enc.step];
+  $('enc-status').textContent=encStatusText(rows,sel);
+  $('enc-trace').innerHTML=traceHTML(sel);
+  $('enc-mu-table').innerHTML=headTable(sel,'mu');
+  $('enc-v-table').innerHTML=headTable(sel,'variance');
+  $('enc-cells').innerHTML=cellsTable(rows);
+  $('enc-cells').querySelectorAll('[data-cell]').forEach(tr=>tr.onclick=()=>{enc.cell=Number(tr.dataset.cell);refreshEncoder();});
+  $('enc-shape-tag').textContent=`X ${rows.length} × 4 → μ ${rows.length} × 2`;
+  drawEncoderStage(rows);drawEncoderDistance();
+}
+function setupEncoder(){
+  enc.playing=false;if(enc.timer){clearTimeout(enc.timer);enc.timer=null;}
+  enc.cell=Math.min(enc.cell,model.data.length-1);
+  $('enc-cell').value=String(enc.cell);$('enc-proj').value=enc.proj;$('enc-all').checked=enc.all;
+  $('enc-cell').onchange=()=>{stopEncPlayback();enc.cell=Number($('enc-cell').value);refreshEncoder();};
+  $('enc-proj').onchange=()=>{stopEncPlayback();enc.proj=$('enc-proj').value;refreshEncoder();};
+  $('enc-all').onchange=()=>{enc.all=$('enc-all').checked;refreshEncoder();};
+  $('enc-step').onclick=()=>{stopEncPlayback();enc.step=enc.step>=5?0:enc.step+1;$('enc-step').textContent=enc.step>=5?'重新从第 1 步运行':'下一阶段';refreshEncoder();};
+  $('enc-auto').onclick=()=>{if(enc.playing){stopEncPlayback();return;}enc.playing=true;enc.step=0;$('enc-auto').textContent='暂停';refreshEncoder();const tick=()=>{if(!enc.playing||active!=='encoder')return;if(enc.step>=5){stopEncPlayback();return;}enc.step++;refreshEncoder();enc.timer=setTimeout(tick,760);};enc.timer=setTimeout(tick,760);};
+  document.querySelectorAll('[data-enc]').forEach(b=>b.onclick=()=>{stopEncPlayback();enc.step=Number(b.dataset.enc);$('enc-step').textContent=enc.step>=5?'重新从第 1 步运行':'下一阶段';refreshEncoder();});
+  $('enc-canvas').onclick=e=>{const box=e.currentTarget.getBoundingClientRect(),x=e.clientX-box.left,y=e.clientY-box.top;let best=-1,bd=1e9;encHit.forEach(p=>{const d=(p.x-x)**2+(p.y-y)**2;if(d<bd){bd=d;best=p.i;}});if(best>=0&&bd<420){stopEncPlayback();enc.cell=best;refreshEncoder();}};
+  $('enc-train').onclick=()=>{
+    stopEncPlayback();enc.ghost=encRows().map(r=>r.mu.value.slice());const before=enc.ghost[enc.cell].slice();
+    for(let k=0;k<40;k++){const r=model.step({lr:.012,lambda:.05,fixedNoise:true,selected:enc.cell});if(r.error){$('enc-train-status').textContent=r.error;return;}}
+    refreshEncoder();const now=encRows()[enc.cell].mu.value;
+    $('enc-train-status').textContent=`已执行 40 次真实更新（与训练页共用模型，更新计数 ${model.epoch}）。${model.data[enc.cell].name} 的 μ 从 [${before.map(v=>fmt(v,3)).join(', ')}] 变为 [${now.map(v=>fmt(v,3)).join(', ')}]，而它在左图的 x 没有变。`;
+  };
+  $('enc-clear-ghost').onclick=()=>{enc.ghost=null;refreshEncoder();$('enc-train-status').textContent='已清除更新前的叠加；参数保持在上一次更新的结果。';};
+  $('enc-step').textContent=enc.step>=5?'重新从第 1 步运行':'下一阶段';
+  refreshEncoder();
 }
 
 renderRoute();

@@ -120,6 +120,66 @@ export class ToyVAE {
   infer(options={}){return this.evaluate({...options,gradient:false,computeLoss:false});}
 }
 
+// --- Encoder introspection: the exact numbers of one forward pass. ---------
+// Everything below is derived from the current model.p, so the page prints the
+// arithmetic the network actually performs, not a redrawn illustration.
+export function encoderTrace(model,i){
+  const row=model.data[i],p=model.p;
+  const raw=[row.x[2],row.x[3],row.x[0],row.x[1]]; // spliced A, B then unspliced A, B
+  const x=raw.map(v=>v/2);
+  const head=(bKey,wKey)=>{
+    const b=[0,1].map(d=>p[bKey+d]);
+    const w=[0,1].map(d=>x.map((_,j)=>p[wKey+d+j]));
+    const terms=w.map(row2=>row2.map((wj,j)=>[wj,x[j],wj*x[j]]));
+    const pre=terms.map(ts=>ts.reduce((s,t)=>s+t[2],0));
+    return {b,w,terms,pre,value:pre.map((s,d)=>b[d]+s)};
+  };
+  const mu=head('mb','m'),vraw=head('vb','v');
+  // Softplus acts on bias + weighted sum, exactly as in ToyVAE.encoder().
+  const pre=vraw.value,act=pre.map(softplus),variance=act.map(v=>v+1e-4),sd=variance.map(Math.sqrt);
+  const eps=model.noise(0)[i],z=mu.value.map((m,d)=>m+sd[d]*eps[d]);
+  return {i,name:row.name,raw,x,obs:{s:[raw[0],raw[1]],u:[raw[2],raw[3]]},
+    mu:{b:mu.b,w:mu.w,terms:mu.terms,sum:mu.pre,value:mu.value},
+    variance:{b:vraw.b,w:vraw.w,terms:vraw.terms,sum:vraw.pre,pre,act,value:variance,sd},
+    eps,z};
+}
+// Two principal directions of a small batch, by power iteration with deflation.
+export function pca2(rows){
+  const n=rows.length,d=rows[0].length;
+  const mean=Array.from({length:d},(_,k)=>rows.reduce((s,r)=>s+r[k],0)/n);
+  const centered=rows.map(r=>r.map((v,k)=>v-mean[k]));
+  let M=Array.from({length:d},()=>Array(d).fill(0));
+  for(const r of centered)for(let a=0;a<d;a++)for(let b=0;b<d;b++)M[a][b]+=r[a]*r[b]/n;
+  const unit=v=>{const s=Math.hypot(...v);return s<1e-12?null:v.map(x=>x/s);};
+  const matVec=(A,v)=>A.map(row=>row.reduce((s,a,j)=>s+a*v[j],0));
+  const dot=(u,v)=>u.reduce((s,a,j)=>s+a*v[j],0);
+  const axes=[],eigen=[];
+  for(let k=0;k<2;k++){
+    let v=unit(Array.from({length:d},(_,t)=>Math.sin((t+1)*(k+1)*1.7)+.01))??Array.from({length:d},(_,t)=>t===k?1:0);
+    for(let it=0;it<300;it++){const nx=unit(matVec(M,v));if(!nx)break;v=nx;}
+    const kk=v.reduce((best,t)=>Math.abs(v[t])>Math.abs(v[best])?t:best,0);
+    if(v[kk]<0)v=v.map(x=>-x);
+    axes.push(v);
+    const lam=dot(v,matVec(M,v));
+    eigen.push(lam);
+    M=M.map((row,a)=>row.map((val,b)=>val-lam*v[a]*v[b]));
+  }
+  const total=eigen.reduce((s,v)=>s+v,0)||1;
+  return {mean,axes,eigen,explained:eigen.map(v=>v/total),scores:centered.map(r=>axes.map(a=>dot(a,r)))};
+}
+// Pairwise distances in the 4-D encoder input versus the 2-D latent mean.
+export function pairwiseGeometry(model){
+  const trace=model.data.map((_,i)=>encoderTrace(model,i)),pairs=[];
+  for(let i=0;i<trace.length;i++)for(let j=i+1;j<trace.length;j++){
+    const dx=Math.hypot(...trace[i].x.map((v,k)=>v-trace[j].x[k]));
+    const dm=Math.hypot(...trace[i].mu.value.map((v,k)=>v-trace[j].mu.value[k]));
+    pairs.push({i,j,dx,dm});
+  }
+  const mx=pairs.reduce((s,p)=>s+p.dx,0)/pairs.length,my=pairs.reduce((s,p)=>s+p.dm,0)/pairs.length;
+  let sxy=0,sxx=0,syy=0;
+  for(const p of pairs){const a=p.dx-mx,b=p.dm-my;sxy+=a*b;sxx+=a*a;syy+=b*b;}
+  return {pairs,r:sxx>0&&syy>0?sxy/Math.sqrt(sxx*syy):0,trace};
+}
 export function gradientCheck(){
   const model=new ToyVAE(42),r=model.evaluate({gradient:true});const checks=[];
   for(const key of ['m00','v00','t00','w00','beta0','gamma0']){

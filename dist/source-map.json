@@ -1,5 +1,6 @@
 {
   "title": "RegVelo 潜空间实验室",
+  "variant": "ds · 增补第四页「编码器映射」",
   "date": "2026-10-25",
   "sources": {
     "RegVelo module": {
@@ -16,8 +17,11 @@
     }
   },
   "source_locations": {
-    "encoder_input": "regvelo/src/regvelo/_module.py:682-684",
+    "encoder_input": "regvelo/src/regvelo/_module.py:676-684",
+    "encoder_network": "regvelo/src/regvelo/_module.py:531-545",
     "encoder_heads_and_sample": "scvi-tools-1.2.0/src/scvi/nn/_base_components.py:283-290",
+    "encoder_multi_sample": "regvelo/src/regvelo/_module.py:686-691",
+    "latent_dimension_default": "regvelo/src/regvelo/_module.py:444-445",
     "decoder_time": "regvelo/src/regvelo/_module.py:755,955",
     "kl": "regvelo/src/regvelo/_module.py:864",
     "reconstruction": "regvelo/src/regvelo/_module.py:866-869",
@@ -33,6 +37,21 @@
     "objective": "average reconstruction NLL plus weighted diagonal-Gaussian KL",
     "optimizer": "Adam, gradient norm capped at 5",
     "not_equivalent_to": "full RegVelo, original solver, complete penalty terms, preprocessing or fitted biological results"
+  },
+  "encoder_demo": {
+    "expression_input": "4 dimensions = 2 genes × (spliced, unspliced); every coordinate divided by 2",
+    "latent_output": "2 dimensions; linear mean head plus linear variance head, no hidden layer, no normalisation",
+    "correspondence": "same cell index gives the same x, so the same mu; z adds the fixed epsilon that the training page also uses, so both pages show the same sample",
+    "displayed_steps": [
+      "read observation",
+      "concatenate and scale",
+      "mean head",
+      "variance head",
+      "reparameterisation",
+      "write to latent space"
+    ],
+    "verification": "encoderTrace() in core.mjs is compared with ToyVAE.encoder() and with the forward pass; mu, variance, z and epsilon agree exactly",
+    "not_equivalent_to": "RegVelo hidden layers, the log(0.01+x) transform, batch normalisation, n_latent = 10, or fitted parameters"
   },
   "posterior_demo": "analytically tractable one-dimensional linear Gaussian model; exact posterior here is not the exact RegVelo posterior",
   "privacy": "No real data uploaded. Calculations run in browser memory. Reload resets training."
