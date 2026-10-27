@@ -1,0 +1,13 @@
+# Local validation output and browser profiles.
+.checks/
+.tmp/
+
+# Generated training/runtime caches; published result bundles live in dist/.
+.runtime/
+
+# Local Python and editor state.
+__pycache__/
+.openai/
+
+# Stray local scratch file.
+/100

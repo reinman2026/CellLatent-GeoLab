@@ -1,0 +1,13 @@
+import {readFileSync,writeFileSync} from 'node:fs';
+import {createHash} from 'node:crypto';
+import {fileURLToPath} from 'node:url';
+import {dirname,join} from 'node:path';
+const root=join(dirname(fileURLToPath(import.meta.url)),'..');
+const ref='E:/PycharmProjects/rna_window_response_hlc_snapshot-regnet/ref';
+const files={module:'regvelo/src/regvelo/_module.py',model:'regvelo/src/regvelo/_model.py',scvi:'scvi-tools-1.2.0/src/scvi/nn/_base_components.py'};
+const wanted={defaults:['module',444,457],input:['module',676,684],encoder:['module',531,545],layers:['scvi',82,96],heads:['scvi',283,290],time:['module',952,968],ode:['module',291,315],loss:['module',864,915],training:['model',259,284],registration:['model',778,808],global_rates:['module',703,722],posterior_api:['model',532,541],posterior_fit:['model',598,626]};
+const texts=Object.fromEntries(Object.entries(files).map(([k,p])=>[k,readFileSync(join(ref,p),'utf8')]));
+const sources=Object.fromEntries(Object.entries(files).map(([k,p])=>[k,{path:p,sha256:createHash('sha256').update(readFileSync(join(ref,p))).digest('hex')}]));
+const excerpts=Object.fromEntries(Object.entries(wanted).map(([key,[file,start,end]])=>[key,{path:files[file],start,end,text:texts[file].split(/\r?\n/).slice(start-1,end).join('\n')}]));
+writeFileSync(join(root,'dist/verified-source.mjs'),'// Verbatim excerpts from the locally verified source snapshot.\nexport const verifiedSource = '+JSON.stringify({date:'2026-10-26',sources,excerpts},null,2)+';\n');
+console.log('Captured '+Object.keys(excerpts).length+' source excerpts.');

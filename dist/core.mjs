@@ -11,6 +11,30 @@ export function gaussian(x,mu,sd){return Math.exp(-.5*((x-mu)/sd)**2)/(Math.sqrt
 export function analyticPosterior(y,a,tau){const v=tau*tau/(tau*tau+a*a);return {mu:a*y/(tau*tau+a*a),variance:v,sd:Math.sqrt(v)};}
 export function klGaussian(mu,v,pm,pv){return .5*((v+(mu-pm)**2)/pv-1+Math.log(pv/v));}
 export function sampleNormal(mu,variance,rng){return mu.map((m,j)=>m+Math.sqrt(variance[j])*rng.normal());}
+
+// Fit the two-pool kinetic terms used by RegVelo from time-ordered S/U pairs.
+// The teaching data has three interleaved groups; each group is treated as a
+// short trajectory so the finite differences do not mix unrelated branches.
+export function fitTwoPoolKinetics(data,{genes=3}={}){
+  const groups=[...new Set(data.map((row,i)=>row.group??i%3))],series=groups.map(group=>data.map((row,i)=>({row,i})).filter(x=>(x.row.group??x.i%3)===group).sort((a,b)=>a.i-b.i));
+  const regression=(xs,ys)=>{const mx=xs.reduce((s,v)=>s+v,0)/Math.max(1,xs.length),my=ys.reduce((s,v)=>s+v,0)/Math.max(1,ys.length),den=xs.reduce((s,v)=>s+(v-mx)**2,0);const slope=den>1e-9?xs.reduce((s,v,i)=>s+(v-mx)*(ys[i]-my),0)/den:0;return {slope,intercept:my-slope*mx};};
+  const solve=(rows,ys)=>{const p=rows[0]?.length??0,A=Array.from({length:p},(_,i)=>Array.from({length:p+1},(_,j)=>j===p?0:0));for(let i=0;i<p;i++)for(let j=0;j<p;j++)A[i][j]=rows.reduce((s,r)=>s+r[i]*r[j],0)+(i===j?1e-5:0);for(let i=0;i<p;i++)A[i][p]=rows.reduce((s,r,k)=>s+r[i]*ys[k],0);for(let i=0;i<p;i++){let pivot=i;for(let k=i+1;k<p;k++)if(Math.abs(A[k][i])>Math.abs(A[pivot][i]))pivot=k;[A[i],A[pivot]]=[A[pivot],A[i]];const d=A[i][i]||1e-8;for(let j=i;j<=p;j++)A[i][j]/=d;for(let k=0;k<p;k++)if(k!==i){const q=A[k][i];for(let j=i;j<=p;j++)A[k][j]-=q*A[i][j];}}return A.map(r=>r[p]);};
+  return Array.from({length:genes},(_,g)=>{
+    const u=[],du=[],s=[],ds=[],regX=[];
+    for(const path of series)for(let k=0;k<path.length-1;k++){
+      const a=path[k].row.raw,b=path[k+1].row.raw,dt=1/Math.max(1,path.length-1);
+      s.push(a[g]);u.push(a[genes+g]);ds.push((b[g]-a[g])/dt);du.push((b[genes+g]-a[genes+g])/dt);regX.push([1,...a.slice(0,genes),a[genes+g]]);
+    }
+    const reg=solve(regX,du),beta=Math.max(.03,-reg.at(-1)),alphaWeights=reg.slice(1,1+genes),alpha=Math.max(.01,reg[0]);
+    const residual=ds.map((v,i)=>v-beta*u[i]),sr=regression(s,residual),gamma=Math.max(.03,-sr.slope);
+    return {alpha,beta,gamma,alphaWeights,fit:{alphaIntercept:reg[0],gammaSlope:sr.slope,samples:u.length}};
+  });
+}
+
+export function twoPoolVelocity(raw,kinetics,{genes=3}={}){
+  const ds=[],du=[];for(let g=0;g<genes;g++){const p=kinetics[g],s=raw[g],u=raw[genes+g],alpha=Math.max(.01,p.alphaWeights?p.fit.alphaIntercept+p.alphaWeights.reduce((sum,w,j)=>sum+w*raw[j],0):p.alpha);du.push(alpha-p.beta*u);ds.push(p.beta*u-p.gamma*s);}
+  return [...ds,...du];
+}
 export function demonstrationCells(d=10){
   return Array.from({length:5},(_,i)=>({name:`细胞 ${i+1}`,mu:Array.from({length:d},(_,j)=>Math.sin((i+1)*(j+1)*.72)*1.35+(i-2)*.12),variance:Array.from({length:d},(_,j)=>.12+.12*((i+j)%4))}));
 }
@@ -187,4 +211,218 @@ export function gradientCheck(){
     const numerical=(plus-minus)/(2*h),analytic=r.gradients[key],relativeError=Math.abs(numerical-analytic)/Math.max(1,Math.abs(numerical),Math.abs(analytic));checks.push({key,numerical,analytic,relativeError});
   }
   return checks;
+}
+
+// Nonlinear representation lab. This is a separate, synthetic VAE, not RegVelo:
+// it reconstructs expression directly and deliberately omits the RNA ODE,
+// normalisation layers, dropout and graph penalties. Shared scalar AD above.
+export class NetworkLab {
+  constructor(dim=2,logInput=false,{genes=12,cellCount=36,standardize=false,data=null}={}){
+    this.dim=dim;this.hidden=8;this.genes=genes;this.input=genes*2;this.logInput=logInput;this.standardize=standardize;
+    const rng=new RNG(811);
+    this.data=data?.length?data.map((row,i)=>({name:row.name??row.id??`细胞 ${i+1}`,group:row.group??i%3,raw:row.raw.slice()})):Array.from({length:cellCount},(_,i)=>{
+      const group=i%3,t=Math.floor(i/3)/Math.max(1,Math.ceil(cellCount/3)-1);
+      const raw=Array.from({length:this.input},(_,j)=>{
+        const gene=j%genes,branch=(group-1)*t;
+        return .15+softplus(-.8+1.5*Math.sin(gene*.73+t*2.1)+branch*Math.cos(gene*1.3)+(j<genes?.35:-.2)+.05*rng.normal());
+      });
+      return {name:`细胞 ${i+1}`,group,raw};
+    });
+    this.kinetics=fitTwoPoolKinetics(this.data,{genes:this.genes});
+    const transformed=this.data.map(c=>c.raw.map(v=>logInput?Math.log(.01+v):v));
+    this.inputMean=Array.from({length:this.input},(_,j)=>standardize?transformed.reduce((s,r)=>s+r[j],0)/this.data.length:0);
+    this.inputSD=this.inputMean.map((m,j)=>standardize?Math.max(1e-6,Math.sqrt(transformed.reduce((s,r)=>s+(r[j]-m)**2,0)/this.data.length)):1);
+    this.reset();
+  }
+  reset(){
+    const r=new RNG(927);this.p={};this.m={};this.v={};this.epoch=0;this.optimizerStep=0;this.parameterSteps={};this.trainingDraw=0;this.lastTrainingNoise=null;this.history=[];this.last=null;
+    const layer=(tag,rows,cols,scale,bias)=>{for(let j=0;j<rows;j++){this.p[`${tag}b${j}`]=bias;for(let k=0;k<cols;k++)this.p[`${tag}${j}_${k}`]=r.normal()*scale;}};
+    layer('h',8,this.input,.17,.25);layer('mu',this.dim,8,.2,0);layer('va',this.dim,8,.03,-2.5);
+    layer('d',8,this.dim,.3,.35);layer('o',this.input,8,.2,.2);
+    this.noise=this.data.map(()=>Array.from({length:this.dim},()=>r.normal()));
+    const evaluationRng=new RNG(849671);
+    this.evaluationNoise=Array.from({length:8},()=>this.data.map(()=>Array.from({length:this.dim},()=>evaluationRng.normal())));
+  }
+  sampleTrainingNoise(){const r=new RNG(604031+(++this.trainingDraw)*104729);this.lastTrainingNoise=this.data.map(()=>Array.from({length:this.dim},()=>r.normal()));return this.lastTrainingNoise;}
+  assess({lambda=.05}={}){
+    const rs=this.evaluationNoise.map(noise=>this.evaluate({lambda,noise}));
+    const mean=key=>rs.reduce((sum,r)=>sum+(r[key]??0),0)/rs.length;
+    return {loss:mean('loss'),reconstruction:mean('reconstruction'),kl:mean('kl'),regulation:mean('regulation'),gradients:null,samples:rs.length};
+  }
+  affine(tag,rows,x){return Array.from({length:rows},(_,j)=>x.reduce((s,v,k)=>s+v*this.p[`${tag}${j}_${k}`],this.p[`${tag}b${j}`]));}
+  inputVector(raw){return raw.map((v,j)=>((this.logInput?Math.log(.01+v):v)-this.inputMean[j])/this.inputSD[j]);}
+  decode(latent){
+    const decoderPre=this.affine('d',8,latent),decoderHidden=decoderPre.map(v=>Math.max(0,v));
+    const outputPre=this.affine('o',this.input,decoderHidden),prediction=outputPre.map(softplus);
+    return {decoderPre,decoderHidden,outputPre,prediction};
+  }
+  trace(i,{gene=0,delta=0,serial=0,useMean=false,epsilon=null}={}){
+    const raw=this.data[i].raw.slice();raw[gene]=Math.max(.001,raw[gene]+delta);
+    const x=this.inputVector(raw),a=this.affine('h',8,x),h=a.map(v=>Math.max(0,v));
+    const mu=this.affine('mu',this.dim,h),vraw=this.affine('va',this.dim,h),variance=vraw.map(v=>softplus(v)+1e-4);
+    const r=new RNG(774+serial*131+i*83),eps=epsilon?epsilon.slice():serial?Array.from({length:this.dim},()=>r.normal()):this.noise[i].slice();
+    const z=mu.map((v,j)=>v+Math.sqrt(variance[j])*eps[j]);
+    const latent=(useMean?mu:z).slice(),decoded=this.decode(latent);
+    return {raw,x,a,h,mu,vraw,variance,eps,z,latent,...decoded};
+  }
+  evaluate({lambda=.1,gradient=false,noise=this.noise}={}){
+    if(!gradient){
+      let reconstruction=0,kl=0;
+      for(let i=0;i<this.data.length;i++){
+        const r=this.trace(i,{useMean:false,epsilon:noise[i]});
+        reconstruction+=r.prediction.reduce((s,v,j)=>s+(v-r.raw[j])**2/(2*.3**2)+Math.log(.3)+.5*Math.log(2*Math.PI),0)/this.data.length;
+        kl+=.5*r.mu.reduce((s,v,j)=>s+v*v+r.variance[j]-Math.log(r.variance[j])-1,0)/this.data.length;
+      }
+      return {loss:reconstruction+lambda*kl,reconstruction,kl,gradients:null};
+    }
+    tape=[];
+    const p=Object.fromEntries(Object.entries(this.p).map(([k,v])=>[k,av(v)]));
+    const linear=(tag,n,x)=>Array.from({length:n},(_,j)=>x.reduce((s,v,k)=>add(s,mul(v,p[`${tag}${j}_${k}`])),p[`${tag}b${j}`]));
+    const relu=a=>{const n=new A(Math.max(0,a.v),()=>{if(a.v>0)a.g+=n.g;});return n;};
+    let rec=av(0),kl=av(0);
+    this.data.forEach((row,i)=>{
+      const x=this.inputVector(row.raw).map(av);
+      const h=linear('h',8,x).map(relu),mu=linear('mu',this.dim,h),v=linear('va',this.dim,h).map(v=>add(sp(v),1e-4));
+      const z=mu.map((m,j)=>add(m,mul(sqrt(v[j]),noise[i][j])));
+      const pred=linear('o',this.input,linear('d',8,z).map(relu)).map(sp);
+      rec=add(rec,sum(pred.map((v,j)=>add(div(sq(sub(v,row.raw[j])),2*.3**2),Math.log(.3)+.5*Math.log(2*Math.PI)))));
+      kl=add(kl,mul(.5,sum(mu.map((m,j)=>sub(sub(add(sq(m),v[j]),log(v[j])),1)))));
+    });
+    rec=div(rec,this.data.length);kl=div(kl,this.data.length);const loss=add(rec,mul(lambda,kl));
+    if(gradient)backward(loss);
+    const result={loss:loss.v,reconstruction:rec.v,kl:kl.v,gradients:gradient?Object.fromEntries(Object.entries(p).map(([k,v])=>[k,v.g])):null};
+    tape=[];return result;
+  }
+  parameterGroup(key){return /^(d|o)/.test(key)?'decoder':/^(mu|va)/.test(key)?'latent':'encoder';}
+  step({lambda=.1,lr=.006,mode='joint'}={}){
+    const noise=this.sampleTrainingNoise(),r=this.evaluate({lambda,gradient:true,noise});
+    if(!Number.isFinite(r.loss)||Object.values(r.gradients).some(v=>!Number.isFinite(v)))throw Error('出现无效数值，请重置实验。');
+    const enabled=key=>mode==='joint'||(mode==='encoder'&&this.parameterGroup(key)!=='decoder')||(mode==='encoderHidden'&&this.parameterGroup(key)==='encoder')||mode===this.parameterGroup(key);
+    const norm=Math.hypot(...Object.entries(r.gradients).filter(([key])=>enabled(key)).map(([,v])=>v)),clip=Math.min(1,10/(norm+1e-12));this.optimizerStep++;this.epoch++;
+    for(const k of Object.keys(this.p))if(enabled(k)){const g=r.gradients[k]*clip,n=(this.parameterSteps[k]??0)+1;this.parameterSteps[k]=n;this.m[k]=.9*(this.m[k]??0)+.1*g;this.v[k]=.999*(this.v[k]??0)+.001*g*g;this.p[k]-=lr*(this.m[k]/(1-.9**n))/(Math.sqrt(this.v[k]/(1-.999**n))+1e-8);}
+    const after=this.evaluate({lambda,noise});this.last={...r,norm,mode,before:r.loss,after:after.loss,noiseSerial:this.trainingDraw};this.history.push({epoch:this.epoch,...after,trainingLoss:after.loss});return this.last;
+  }
+}
+
+// Early stopping on this teaching experiment's deterministic training objective.
+// The best checkpoint contains Adam moments/counters as well as weights, so
+// continuing after restoration is consistent. epoch counts actual updates.
+export class AutoFitSession {
+  constructor(model,metrics,{minSteps=100,patience=100,maxSteps=1000,relativeTolerance=.001}={}){
+    if(!Number.isFinite(metrics.loss))throw Error('当前目标无效，请先重置模型。');
+    this.options={minSteps,patience,maxSteps,relativeTolerance};this.startEpoch=model.epoch;this.startLoss=metrics.loss;this.attempts=0;this.stale=0;this.anchor=metrics.loss;this.done=false;this.reason=null;this.record(model,metrics);
+  }
+  record(model,metrics){
+    this.best={epoch:model.epoch,metrics:{loss:metrics.loss,reconstruction:metrics.reconstruction,kl:metrics.kl,regulation:metrics.regulation},p:{...model.p},m:{...model.m},v:{...model.v},optimizerStep:model.optimizerStep,parameterSteps:model.parameterSteps?{...model.parameterSteps}:null,trainingDraw:model.trainingDraw,lastTrainingNoise:model.lastTrainingNoise,last:model.last};
+  }
+  observe(model,metrics){
+    if(this.done)return true;
+    if(!Number.isFinite(metrics.loss))throw Error('目标出现无效数值，已停止自动优化。');
+    this.attempts++;if(metrics.loss<this.best.metrics.loss)this.record(model,metrics);
+    const {relativeTolerance,minSteps,patience,maxSteps}=this.options;
+    if(this.anchor-metrics.loss>relativeTolerance*Math.max(1,Math.abs(this.anchor))){this.anchor=metrics.loss;this.stale=0;}else this.stale++;
+    if(this.attempts>=maxSteps){this.done=true;this.reason='limit';}
+    else if(this.attempts>=minSteps&&this.stale>=patience){this.done=true;this.reason='plateau';}
+    return this.done;
+  }
+  finish(model,reason=this.reason??'paused'){
+    const best=this.best,restored=Object.keys(best.p).some(k=>best.p[k]!==model.p[k]);
+    model.p={...best.p};model.m={...best.m};model.v={...best.v};model.optimizerStep=best.optimizerStep;
+    model.trainingDraw=best.trainingDraw;model.lastTrainingNoise=best.lastTrainingNoise;
+    if(best.parameterSteps)model.parameterSteps={...best.parameterSteps};model.last=best.last;
+    if(restored)model.history.push({epoch:model.epoch,...best.metrics,restored:true});
+    this.done=true;this.reason=reason;
+    return {reason,attempts:this.attempts,bestStep:best.epoch-this.startEpoch,bestEpoch:best.epoch,startLoss:this.startLoss,bestLoss:best.metrics.loss,restored,options:{...this.options}};
+  }
+}
+
+// Joint dynamics teaching model. It shares the paper-toy observations with
+// NetworkLab; the decoder predicts one time per gene and integrates the
+// coupled ODE. No synthetic group labels or known times enter the loss.
+const kineticOps={add:(a,b)=>a+b,sub:(a,b)=>a-b,mul:(a,b)=>a*b,div:(a,b)=>a/b,sp:softplus,av:x=>x};
+const kineticADOps={add,sub,mul,div,sp,av};
+function kineticFieldInternal(state,p,o,genes=3){
+  const u=state.slice(0,genes),s=state.slice(genes),alpha=s.map((_,g)=>o.sp(s.reduce((v,sj,j)=>o.add(v,o.mul(p[`kw${g}_${j}`],sj)),p['kb'+g])));
+  const beta=s.map((_,g)=>o.sp(p['kbeta'+g])),gamma=s.map((_,g)=>o.sp(p['kgamma'+g]));
+  return [...u.map((v,g)=>o.sub(alpha[g],o.mul(beta[g],v))),...s.map((v,g)=>o.sub(o.mul(beta[g],u[g]),o.mul(gamma[g],v)))];
+}
+function kineticIntegrateInternal(time,p,steps,o,genes=3){
+  let y=Array.from({length:2*genes},()=>o.av(0));const dt=o.div(time,steps);
+  const shift=(state,k,f)=>state.map((v,j)=>o.add(v,o.mul(o.mul(dt,f),k[j])));
+  for(let k=0;k<steps;k++){
+    const a=kineticFieldInternal(y,p,o,genes),b=kineticFieldInternal(shift(y,a,.5),p,o,genes),c=kineticFieldInternal(shift(y,b,.5),p,o,genes),d=kineticFieldInternal(shift(y,c,1),p,o,genes);
+    y=y.map((v,j)=>o.add(v,o.mul(o.div(dt,6),o.add(o.add(a[j],o.mul(2,b[j])),o.add(o.mul(2,c[j]),d[j])))));
+  }
+  return y;
+}
+export function kineticState(time,parameters,steps=12,genes=3){return kineticIntegrateInternal(time,parameters,steps,kineticOps,genes);}
+export function kineticField(state,parameters,genes=3){return kineticFieldInternal(state,parameters,kineticOps,genes);}
+
+export class DynamicsLab extends NetworkLab {
+  constructor({data=null,genes=3}={}){super(3,false,{genes,cellCount:data?.length??24,standardize:true,data});this.genes=genes;this.tMax=4;this.odeSteps=12;this.sigma=.2;this.gradientBatchSize=Math.min(this.data.length,16);this.parameterSteps={};}
+  reset(){
+    super.reset();for(const key of Object.keys(this.p))if(/^o[0-9b]/.test(key))delete this.p[key];
+    const rng=new RNG(20261026);
+    for(let g=0;g<this.genes;g++){
+      this.p['tmb'+g]=-.2+g*.12;
+      for(let j=0;j<8;j++)this.p[`tm${g}_${j}`]=rng.normal()*.22;
+      this.p['kb'+g]=invsp(.8+g*.15);this.p['kbeta'+g]=invsp(.8+g*.1);this.p['kgamma'+g]=invsp(.55+g*.08);
+      for(let j=0;j<this.genes;j++)this.p[`kw${g}_${j}`]=rng.normal()*.09;
+    }
+    this.parameterSteps={};this.last=null;
+  }
+  rates(){return Array.from({length:this.genes},(_,g)=>({beta:softplus(this.p['kbeta'+g]),gamma:softplus(this.p['kgamma'+g]),bias:this.p['kb'+g],weights:Array.from({length:this.genes},(_,j)=>this.p[`kw${g}_${j}`])}));}
+  decode(latent){
+    const decoderPre=this.affine('d',8,latent),decoderHidden=decoderPre.map(v=>Math.max(0,v)),timePre=this.affine('tm',this.genes,decoderHidden),time=timePre.map(v=>this.tMax*sigmoid(v));
+    const integratedStates=time.map(t=>kineticState(t,this.p,this.odeSteps,this.genes));
+    const prediction=[...integratedStates.map((y,g)=>y[this.genes+g]),...integratedStates.map((y,g)=>y[g])];
+    return {decoderPre,decoderHidden,timePre,time,integratedStates,prediction};
+  }
+  evaluate({lambda=.05,gradient=false,noise=this.noise}={}){
+    if(!gradient){
+      let reconstruction=0,kl=0;
+      for(let i=0;i<this.data.length;i++){
+        const r=this.trace(i,{useMean:false,epsilon:noise[i]});
+        reconstruction+=r.prediction.reduce((sum,v,j)=>sum+(v-r.raw[j])**2/(2*this.sigma**2)+Math.log(this.sigma)+.5*Math.log(2*Math.PI),0)/this.data.length;
+        kl+=.5*r.mu.reduce((sum,v,j)=>sum+v*v+r.variance[j]-Math.log(r.variance[j])-1,0)/this.data.length;
+      }
+      const regulation=.001*Object.entries(this.p).filter(([key])=>key.startsWith('kw')).reduce((sum,[,v])=>sum+v*v,0);
+      return {loss:reconstruction+lambda*kl+regulation,reconstruction,kl,regulation,gradients:null};
+    }
+    tape=[];const p=Object.fromEntries(Object.entries(this.p).map(([key,v])=>[key,av(v)]));
+    const linear=(tag,n,x)=>Array.from({length:n},(_,j)=>x.reduce((sum,v,k)=>add(sum,mul(v,p[`${tag}${j}_${k}`])),p[`${tag}b${j}`]));
+    const relu=a=>{const n=new A(Math.max(0,a.v),()=>{if(a.v>0)a.g+=n.g;});return n;};
+    let reconstruction=av(0),kl=av(0);
+    const batchIndices=this.data.length>this.gradientBatchSize?Array.from({length:this.gradientBatchSize},(_,k)=>Math.floor(k*this.data.length/this.gradientBatchSize)):this.data.map((_,i)=>i);
+    batchIndices.forEach(i=>{const row=this.data[i];
+      const h=linear('h',8,this.inputVector(row.raw)).map(relu),mu=linear('mu',3,h),variance=linear('va',3,h).map(v=>add(sp(v),1e-4));
+      const z=mu.map((v,j)=>add(v,mul(sqrt(variance[j]),noise[i][j]))),hidden=linear('d',8,z).map(relu),time=linear('tm',this.genes,hidden).map(v=>mul(this.tMax,sig(v)));
+      const ys=time.map(t=>kineticIntegrateInternal(t,p,this.odeSteps,kineticADOps,this.genes)),prediction=[...ys.map((y,g)=>y[this.genes+g]),...ys.map((y,g)=>y[g])];
+      reconstruction=add(reconstruction,sum(prediction.map((v,j)=>add(div(sq(sub(v,row.raw[j])),2*this.sigma**2),Math.log(this.sigma)+.5*Math.log(2*Math.PI)))));
+      kl=add(kl,mul(.5,sum(mu.map((v,j)=>sub(sub(add(sq(v),variance[j]),log(variance[j])),1)))));
+    });
+    reconstruction=div(reconstruction,batchIndices.length);kl=div(kl,batchIndices.length);
+    const regulation=mul(.001,sum(Object.keys(p).filter(key=>key.startsWith('kw')).map(key=>sq(p[key])))),loss=add(add(reconstruction,mul(lambda,kl)),regulation);
+    backward(loss);
+    const result={loss:loss.v,reconstruction:reconstruction.v,kl:kl.v,regulation:regulation.v,gradients:Object.fromEntries(Object.entries(p).map(([key,v])=>[key,v.g]))};tape=[];return result;
+  }
+  parameterGroup(key){return key.startsWith('kbeta')?'beta':key.startsWith('kgamma')?'gamma':key.startsWith('k')?'grn':/^(d|tm)/.test(key)?'time':'encoder';}
+  step({lambda=.05,lr=.008,mode='joint'}={}){
+    const noise=this.sampleTrainingNoise(),result=this.evaluate({lambda,gradient:true,noise}),before={...this.p};
+    const enabled=key=>mode==='joint'||(mode==='rates'&&['beta','gamma','grn'].includes(this.parameterGroup(key)))||mode===this.parameterGroup(key);
+    if(!Number.isFinite(result.loss)||Object.values(result.gradients).some(v=>!Number.isFinite(v)))throw Error('动力学出现非有限数值，请重置本页模型。');
+    const norm=Math.hypot(...Object.entries(result.gradients).filter(([key])=>enabled(key)).map(([,v])=>v)),clip=Math.min(1,10/(norm+1e-12));
+    for(const key of Object.keys(this.p))if(enabled(key)){
+      const g=result.gradients[key]*clip,n=(this.parameterSteps[key]??0)+1;this.parameterSteps[key]=n;
+      this.m[key]=.9*(this.m[key]??0)+.1*g;this.v[key]=.999*(this.v[key]??0)+.001*g*g;
+      this.p[key]-=lr*(this.m[key]/(1-.9**n))/(Math.sqrt(this.v[key]/(1-.999**n))+1e-8);
+    }
+    this.epoch++;const after=this.evaluate({lambda,noise}),groups={};
+    for(const group of ['encoder','time','grn','beta','gamma']){
+      const keys=Object.keys(this.p).filter(key=>this.parameterGroup(key)===group);
+      groups[group]={gradientNorm:Math.hypot(...keys.map(key=>result.gradients[key])),updateNorm:Math.hypot(...keys.map(key=>this.p[key]-before[key])),enabled:keys.some(enabled)};
+    }
+    this.last={...result,before:result.loss,after:after.loss,groups,mode,noiseSerial:this.trainingDraw,changes:Object.fromEntries(Object.keys(this.p).map(key=>[key,{before:before[key],after:this.p[key],gradient:result.gradients[key]}]))};
+    this.history.push({epoch:this.epoch,...after,trainingLoss:after.loss});return this.last;
+  }
 }

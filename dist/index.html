@@ -3,25 +3,28 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="结合 RegVelo 本地源码，交互理解训练、潜空间、近似后验，以及编码器怎样把一个细胞的表达位置逐步算成潜空间位置。">
+  <meta name="description" content="十二维表达与三维潜分布联动；两池蓄水池、逐基因潜时间与动力学参数联合估计。操作真实计算，观察轨迹、误差与梯度更新。">
   <meta name="theme-color" content="#14273d">
-  <title>RegVelo 潜空间实验室</title>
+  <title>RegVelo 三空间实验室</title>
   <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<body class="spatial-page">
   <a class="skip" href="#main">跳到主要内容</a>
   <header class="topbar"><div class="shell head-inner">
-    <a class="brand" href="#training" aria-label="RegVelo 潜空间实验室首页"><span class="brand-icon" aria-hidden="true">∴</span><span>RegVelo <b>潜空间实验室</b></span></a>
-    <nav aria-label="四个教学页面">
-      <a href="#training" data-route="training">01 训练过程</a>
-      <a href="#space" data-route="space">02 潜空间的形式</a>
-      <a href="#posterior" data-route="posterior">03 后验与近似</a>
-      <a href="#encoder" data-route="encoder">04 编码器映射</a>
+    <a class="brand" href="#replicas" aria-label="RegVelo 三空间实验室首页"><span class="brand-icon" aria-hidden="true">∴</span><span>RegVelo <b>三空间实验室</b></span></a>
+    <nav aria-label="四个主要页面、原始三空间教学页和旧版三次独立拟合入口">
+      <a href="#replicas" data-route="replicas">01 五行三空间</a>
+      <a href="#stability" data-route="stability">02 20次稳定性</a>
+      <a href="#geometry" data-route="geometry">03 凸包与椭球</a>
+      <a href="#kinetics" data-route="kinetics">04 DIY训练与动力学</a>
+      <a href="#paper" data-route="paper">05 论文实验：先验到网络</a>
+      <a href="#overview" data-route="overview">原始三空间教学</a>
+      <a href="#replica-compare" data-route="replica-compare">五组模型对比</a>
     </nav>
   </div></header>
   <main id="main" class="shell" tabindex="-1"></main>
-  <footer class="shell footer"><span>源码对齐：本地 RegVelo · scvi-tools 1.2.0</span><span>图中数据均为教学构造 · 无真实细胞数据上传</span><a href="source-map.json" target="_blank" rel="noopener">查看来源与版本</a></footer>
-  <noscript><div class="shell panel">交互实验需要启用 JavaScript。潜空间在默认模型中是 ℝ¹⁰；每个细胞的近似后验用一个均值向量和一个方差向量表示，抽样后得到一个潜变量向量。第四页把编码器的一次前向计算逐步展开：4 维表达输入经均值头与方差头得到 2 个均值与 2 个方差，再由一份标准正态噪声得到样本 z。</div></noscript>
+  <footer class="shell footer"><span>源码对齐：本地 RegVelo · scvi-tools 1.2.0</span><span>图中数据均为教学构造 · 无真实细胞数据上传</span><a href="模型路线图.html" target="_blank" rel="noopener">一页模型讲义</a><a href="source-map.json" target="_blank" rel="noopener">查看来源与版本</a></footer>
+  <noscript><div class="shell panel">交互实验需要 JavaScript。本实验统一使用十二维表达（六个基因的 S/U 特征）、三维潜变量和十二维重建。每个细胞的三维椭球以均值为中心、以标准差的倍数为半轴。两池与潜时间页面另用可微分动力学模型，把三维潜变量变成逐基因时间，再解方程预测表达。</div></noscript>
   <script type="module" src="app.mjs"></script>
 </body>
 </html>

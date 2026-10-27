@@ -1,0 +1,5 @@
+export function createGeometryLab(){
+  const titles={geometry:'凸包与椭球的几何定义'};
+  function template(){return `<div class="rp-page"><div class="page-intro"><p class="eyebrow">REGVELO · 几何定义</p><h1>凸包、后验椭球与 MVEE</h1><p>第三页只讲几何对象本身，帮助区分单细胞不确定性与整批细胞的外部形状。</p></div><section class="panel"><h2>Convex hull（凸包）</h2><p>凸包是包含全部 24 个细胞均值点的最小凸集合。三维情况下，它由外层点组成的不规则凸多面体表示。</p><p class="rp-formula">H = { Σᵢ λᵢ μᵢ | λᵢ ≥ 0，Σᵢ λᵢ = 1 }</p><p>它不预设球形或高斯分布，适合观察细胞点集占据的外部区域。内部点不会改变凸包的外边界。</p></section><section class="panel"><h2>单细胞后验椭球</h2><p>每个细胞由编码器给出一个三维对角高斯后验：</p><p class="rp-formula">q(zᵢ | xᵢ) = N(μᵢ, diag(vᵢ))</p><p>等密度面满足：</p><p class="rp-formula">Σⱼ (zⱼ − μᵢⱼ)² / vᵢⱼ = k²</p><p>中心是 μ，半轴是 k√v。它表达单个细胞潜坐标的不确定性，和整批细胞的包围范围含义不同。</p></section><section class="panel"><h2>MVEE（Minimum Volume Enclosing Ellipsoid，最小体积包围椭球）</h2><p>MVEE 用一个体积尽可能小的椭球包住全部细胞均值点。它提供整体中心、主轴方向和长短轴长度。</p><p class="rp-formula">(z − c)ᵀ A (z − c) ≤ 1</p><p>MVEE 是几何摘要，不代表 95% 高斯置信区域。页面第二页和首页都可以单独开关它。</p></section><section class="panel"><h2>本页的方向约定</h2><p>绘图先读取第一个细胞椭球的主轴方向，再把长轴旋到水平、次长轴旋到垂直。凸包、MVEE 和坐标轴使用相同的显示变换，因此它们的相对角度保持一致。</p></section></div>`;}
+  return {template,setup(){},stop(){},refresh(){},state:()=>({})};
+}

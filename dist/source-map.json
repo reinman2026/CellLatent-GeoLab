@@ -1,7 +1,7 @@
 {
-  "title": "RegVelo 潜空间实验室",
-  "variant": "ds · 增补第四页「编码器映射」",
-  "date": "2026-10-25",
+  "title": "RegVelo 三空间实验室",
+  "variant": "六维表达与三维潜变量；直接重建实验及独立的时间解码—两池动力学联合拟合实验，共用观测数据",
+  "date": "2026-10-26",
   "sources": {
     "RegVelo module": {
       "path": "regvelo/src/regvelo/_module.py",
@@ -25,34 +25,99 @@
     "decoder_time": "regvelo/src/regvelo/_module.py:755,955",
     "kl": "regvelo/src/regvelo/_module.py:864",
     "reconstruction": "regvelo/src/regvelo/_module.py:866-869",
-    "full_objective": "regvelo/src/regvelo/_module.py:909-915"
+    "full_objective": "regvelo/src/regvelo/_module.py:909-915",
+    "hidden_layer_order": "scvi-tools-1.2.0/src/scvi/nn/_base_components.py:82-96",
+    "defaults": "regvelo/src/regvelo/_module.py:444-457",
+    "training_and_validation": "regvelo/src/regvelo/_model.py:259-284"
   },
-  "scope": "默认 normal 潜变量配置；近似后验为对角高斯。",
-  "training_demo": {
-    "data": "10 personal-data-free synthetic cells, two genes",
-    "latent_dimension": 2,
-    "encoder": "linear mean/variance heads, spliced then unspliced, input divided by 2",
-    "dynamics": "two-gene Softplus GRN, per-gene terminal times, differentiable 6-step RK4",
-    "likelihood": "independent Gaussian with fixed standard deviation 0.18",
-    "objective": "average reconstruction NLL plus weighted diagonal-Gaussian KL",
-    "optimizer": "Adam, gradient norm capped at 5",
-    "not_equivalent_to": "full RegVelo, original solver, complete penalty terms, preprocessing or fitted biological results"
+  "routes": [
+    "overview",
+    "encoder",
+    "training",
+    "space",
+    "kinetics",
+    "construction"
+  ],
+  "legacy_route_aliases": {
+    "network": "encoder",
+    "posterior": "space"
   },
-  "encoder_demo": {
-    "expression_input": "4 dimensions = 2 genes × (spliced, unspliced); every coordinate divided by 2",
-    "latent_output": "2 dimensions; linear mean head plus linear variance head, no hidden layer, no normalisation",
-    "correspondence": "same cell index gives the same x, so the same mu; z adds the fixed epsilon that the training page also uses, so both pages show the same sample",
-    "displayed_steps": [
-      "read observation",
-      "concatenate and scale",
-      "mean head",
-      "variance head",
-      "reparameterisation",
-      "write to latent space"
+  "automatic_optimization": {
+    "control_location": "right side of the top cell/decoder toolbar on all six routes",
+    "selection": "best mean objective across 8 fixed evaluation noise batches, independent of fresh training epsilon; same cells, not held-out validation",
+    "stopping": "at least 100 epochs, stop after 100 without accumulated score improvement greater than 0.001*max(1,abs(reference_score)); user budget 100/500/1000/3000/10000, default 1000",
+    "restore": "restore best weights, Adam moments/counters and training noise generator counter; preserve actual update count; display selected checkpoint separately",
+    "pause": "manual pause or navigation stops work and restores the best automatic checkpoint",
+    "validation": "passed: top controls unique on all routes; automatic run completes; plateau/cap/pause; reported loss matches restored model; continued Adam updates match the saved checkpoint for both models"
+  },
+  "teaching_model": {
+    "class": "NetworkLab",
+    "source": "dist/core.mjs",
+    "cells": 24,
+    "genes": 3,
+    "input_dimensions": 6,
+    "latent_dimensions": 3,
+    "output_dimensions": 6,
+    "feature_order": [
+      "S_A",
+      "S_B",
+      "S_C",
+      "U_A",
+      "U_B",
+      "U_C"
     ],
-    "verification": "encoderTrace() in core.mjs is compared with ToyVAE.encoder() and with the forward pass; mu, variance, z and epsilon agree exactly",
-    "not_equivalent_to": "RegVelo hidden layers, the log(0.01+x) transform, batch normalisation, n_latent = 10, or fitted parameters"
+    "encoder": "fixed feature standardization -> 8 ReLU hidden units -> 3 means and 3 Softplus variances",
+    "decoder": "full 3D mean or sample -> 8 ReLU hidden units -> 6 Softplus expression means",
+    "ellipsoids": "one 3D Gaussian contour per cell, centered at mu with semiaxes k*sqrt(variance); exact orthographic silhouettes; k=1, 2 or 2.795483482915 for 95% mass; sampled decoder points do not move the center",
+    "kinetics": "legacy space page only: regression from assumed synthetic group ordering, not RegVelo joint inference; used for illustrative velocity arrows",
+    "umap": "deterministic teaching UMAP-style fuzzy k-neighbor projection of 3D latent means to 2D; group-wise temporal paths are connected and kinetic velocity is mapped to arrow direction",
+    "training": "fresh independent epsilon for every cell/dimension each full-batch epoch; Gaussian NLL sigma=0.3; KL weight=0.05; Adam lr=0.008; fixed 8-noise assessment batches only for scoring",
+    "data": "deterministic synthetic observations; color labels do not enter the loss",
+    "not_implemented": "this direct-reconstruction model omits gene-time decoder and RNA ODE; see the independent dynamics_teaching_model for a differentiable ODE example"
   },
-  "posterior_demo": "analytically tractable one-dimensional linear Gaussian model; exact posterior here is not the exact RegVelo posterior",
-  "privacy": "No real data uploaded. Calculations run in browser memory. Reload resets training."
+  "dynamics_teaching_model": {
+    "class": "DynamicsLab",
+    "route": "kinetics",
+    "source": "dist/core.mjs and dist/kinetics-lab.mjs",
+    "data": "same 24 synthetic six-dimensional observations as NetworkLab; group labels and known ordering never enter the joint loss",
+    "path": "6 standardized features -> 8 ReLU -> 3 means and variances -> reparameterized z -> 8 ReLU -> 3 sigmoid gene-specific times -> coupled three-gene ODE -> 6 expression predictions",
+    "time": "t_ig = 4 * sigmoid(time_head_g(z_i)); no observed real times or calibrated clock units",
+    "field": "alpha_g(s) = Softplus(b_g + sum_j W_gj*s_j); du_g/dt = alpha_g(s)-beta_g*u_g; ds_g/dt = beta_g*u_g-gamma_g*s_g",
+    "positive_rates": "beta and gamma use unconstrained raw parameters transformed by Softplus",
+    "integration": "differentiable fixed 12-step RK4 from u(0)=s(0)=0; full three-gene state integrated at each gene-specific time; read out matching gene components",
+    "objective": "Gaussian NLL sigma=0.2 + 0.05*KL + 0.001*sum(W^2); fresh epsilon per training update; preview draws and fixed 8-batch score independent of training",
+    "optimization": "actual reverse-mode differentiation through all RK4 stages; Adam lr=0.008; gradient norm clipped at 10; per-parameter step counters",
+    "experiments": "joint, rates, time, encoder, GRN, beta and gamma group updates; each module has a 10-epoch fine-tuning control; parameter sliders; observation cursor independent of learned time",
+    "limitations": "small teaching implementation, not complete RegVelo; no batch/layer normalization, dropout, learnable observation noise, graph priors or original auxiliary constraints; fixed zero root and relative time scale; kinetic parameters need not be uniquely identifiable"
+  },
+  "regvelo_defaults": {
+    "n_hidden": 256,
+    "n_latent": 10,
+    "n_layers": 1,
+    "dropout_rate": 0.1,
+    "log_variational": false,
+    "use_batch_norm": "both",
+    "use_layer_norm": "both",
+    "hidden_order": [
+      "Linear",
+      "BatchNorm",
+      "LayerNorm",
+      "ReLU",
+      "Dropout"
+    ]
+  },
+  "validation": {
+    "numerical": "passed: six-dimensional standardization, 3D gradient finite differences, ellipsoid surface equation and rotated projection, two-pool kinetics, 2D embedding, raw-vector decoding and 100 actual updates",
+    "interactions": "passed: shared fixed-shape model across six pages, ellipsoid scope and contour changes preserve decoder input, two-pool kinetics table and 24-point UMAP state render, resampling preserves mean and variance, linked cell selection, perturbation, sampling, rotation handlers, training, pause, legacy aliases and reset in a Node DOM/canvas harness",
+    "dynamics_numerical": "passed 2026-10-26: numeric/AD loss agreement, finite differences, analytic constant-alpha solution, mass balance, integration convergence, frozen groups and fresh-noise training; 30 updates reduce the fixed-preview loss from 17.7221474337 to 0.4269529930",
+    "dynamics_interactions": "passed 2026-10-26 in Node DOM/canvas harness: six stages, same observations, gene-specific times, resampling invariance, cursor independence, parameter sliders, all three fitting modes, real joint training, play/pause, rotation, resize, independent persistent models and route-change cancellation",
+    "visual": "passed 2026-10-26: Chrome 156.0.8078.47 real-browser check across 1440/390/320 widths, six routes and offline build; console errors 0; screenshots and report in .checks/",
+    "sampling": "passed: fresh epsilon across all cells/dimensions, independent preview, 8-batch assessment equality, arbitrary-noise gradient checks, frozen module scopes, optimizer and RNG checkpoint continuation"
+  },
+  "layout": "three vertically stacked expression/latent/reconstruction rows at all widths; existing 3D ellipsoids retained",
+  "regvelo_output_semantics": {
+    "rates": "beta/gamma and W/b are fitted shared point parameters, read directly; no average over genes or latent axes",
+    "expression": "local rgv_expression_fit defaults to n_samples=1, return_mean=True; for M>1 it runs posterior samples through decoder and ODE then averages over the sample axis",
+    "preview": "website expression preview still follows selected mean or single latent sample; it is not relabeled a posterior prediction mean"
+  }
 }
